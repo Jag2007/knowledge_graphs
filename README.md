@@ -17,7 +17,7 @@ It exposes a simple **FastAPI** backend:
 - Groq API key
 
 ## Setup (Quickstart)
-1. Open a terminal and `cd` into `kg_project/`
+1. Open a terminal and `cd` into the repository root (where `app.py` lives)
 2. (Optional) Create/activate a virtual environment
 3. Install dependencies:
    ```bash
@@ -25,7 +25,7 @@ It exposes a simple **FastAPI** backend:
    ```
 
 ## Configure environment variables
-Create a `.env` file inside `kg_project/` (this file is ignored by git).
+Create a `.env` file in the repository root (this file is ignored by git).
 
 Use:
 ```bash
@@ -40,7 +40,7 @@ Notes:
 - During PDF ingestion you may see `RAW LLM OUTPUT:` lines in the server logs (used for debugging triple extraction).
 
 ## Run the server
-From the `kg_project/` directory:
+From the repository root:
 ```bash
 uvicorn app:app --reload
 ```
