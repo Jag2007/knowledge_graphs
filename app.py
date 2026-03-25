@@ -1,5 +1,9 @@
 import traceback
+from pathlib import Path
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from utils import extract_text_from_pdf, chunk_text
@@ -8,9 +12,18 @@ from graph import Neo4jGraph
 from query_engine import ask_question
 
 app = FastAPI(title="Knowledge Graph Builder")
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 class QuestionRequest(BaseModel):
     question: str
+
+
+@app.get("/")
+async def index():
+    """Serve the frontend."""
+    return FileResponse(STATIC_DIR / "index.html")
 
 @app.post("/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -55,27 +68,45 @@ async def upload_pdf(file: UploadFile = File(...)):
             "message": "PDF processed successfully",
             "chunks_processed": len(chunks),
             "triples_added": triples_added,
-            "sample_triples": extracted_triples_debug
+            "sample_triples": extracted_triples_debug,
+            "debug": {
+                "chunks_processed": len(chunks),
+                "sample_triples": extracted_triples_debug,
+                "triples_added": triples_added,
+            },
         }
 
     except Exception as e:
-        err_msg = str(e)
-        if isinstance(e, HTTPException):
-            raise
         print("ERROR IN UPLOAD_PDF:")
         print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=err_msg)
+        return {
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }
 
 @app.post("/ask")
 async def ask(q: QuestionRequest):
     """Ask a natural language question against the Knowledge Graph."""
     response = ask_question(q.question)
+    results = response.get("results", [])
+    answer = response.get("answer", "").strip()
+
+    if not results:
+        answer = "It is not in the uploaded document. Please check the text."
+    elif not answer:
+        answer = "A result was found in the uploaded document."
     
-    # Return directly formatted debug logic (pipeline may be multi-hop).
     return {
         "triples_added": response.get("triples_added", 0),
         "query": response.get("query", ""),
-        "results": response.get("results", []),
-        "answer": response.get("answer", ""),
-        "steps": response.get("steps_taken", response.get("steps", []))
+        "results": results,
+        "answer": answer,
+        "steps": response.get("steps_taken", response.get("steps", [])),
+        "debug": {
+            "question": q.question,
+            "query": response.get("query", ""),
+            "results": results,
+            "steps": response.get("steps_taken", response.get("steps", [])),
+            "triples_added": response.get("triples_added", 0),
+        },
     }
