@@ -1,0 +1,8 @@
+spacy
+neo4j
+groq
+python-dotenv
+fastapi
+uvicorn
+pymupdf
+python-multipart

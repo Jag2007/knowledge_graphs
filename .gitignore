@@ -1,0 +1,28 @@
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+/.venv/
+**/.venv/
+**/venv/
+
+# Environment files (secrets)
+.env
+.env.*
+
+# Logs / local databases
+*.log
+*.sqlite3
+*.db
+*.neo4j
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
