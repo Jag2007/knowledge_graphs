@@ -14,6 +14,7 @@ class Neo4jGraph:
     def __init__(self):
         try:
             self.driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+            self.driver.verify_connectivity()
         except Exception as e:
             print(f"Failed to connect to Neo4j: {e}")
             self.driver = None
@@ -43,6 +44,23 @@ class Neo4jGraph:
                 rel_type=rel_type,
             )
 
+    @staticmethod
+    def _insert_triple_tx(tx, subject: str, relation: str, object_: str) -> None:
+        """Insert a triple using an existing Neo4j transaction."""
+        rel_type = normalise_relation_for_neo4j(relation)
+        query = f"""
+        MERGE (s:Entity {{name: $subject}})
+        MERGE (o:Entity {{name: $object}})
+        MERGE (s)-[r:{rel_type}]->(o)
+        SET r.relType = $rel_type
+        """
+        tx.run(
+            query,
+            subject=subject,
+            object=object_,
+            rel_type=rel_type,
+        )
+
     def insert_triples(self, triples: list[dict]) -> int:
         """
         Insert triples into the Neo4j graph.
@@ -56,7 +74,7 @@ class Neo4jGraph:
             tx = session.begin_transaction()
             try:
                 for t in triples:
-                    self.insert_triple(t["subject"], t["relation"], t["object"])
+                    self._insert_triple_tx(tx, t["subject"], t["relation"], t["object"])
                 tx.commit()
             except Exception as e:
                 tx.rollback()

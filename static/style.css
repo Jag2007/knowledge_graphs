@@ -223,6 +223,20 @@ textarea {
   line-height: 1.5;
 }
 
+.json-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.json-label {
+  margin: 12px 0 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #bdbdbd;
+}
+
 .summary-stats {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -264,5 +278,9 @@ textarea {
 
   .page-shell {
     width: min(100% - 24px, 1180px);
+  }
+
+  .json-split {
+    grid-template-columns: 1fr;
   }
 }

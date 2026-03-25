@@ -6,7 +6,9 @@ const uploadSummary = document.getElementById("upload-summary");
 const answerPanel = document.getElementById("answer-panel");
 const uploadJsonPanel = document.getElementById("upload-json-panel");
 const askJsonPanel = document.getElementById("ask-json-panel");
+const uploadJsonInput = document.getElementById("upload-json-input");
 const uploadJsonContent = document.getElementById("upload-json-content");
+const askJsonInput = document.getElementById("ask-json-input");
 const askJsonContent = document.getElementById("ask-json-content");
 const uploadMessage = document.getElementById("upload-message");
 const uploadChunks = document.getElementById("upload-chunks");
@@ -40,6 +42,10 @@ uploadForm.addEventListener("submit", async (event) => {
 
   const formData = new FormData();
   formData.append("file", fileInput.files[0]);
+  uploadJsonInput.textContent = prettyJson({
+    file_name: fileInput.files[0].name,
+    content_type: fileInput.files[0].type || "application/pdf",
+  });
 
   uploadStatus.textContent = "Uploading the PDF and building the graph...";
   uploadSummary.classList.add("hidden");
@@ -82,12 +88,14 @@ askForm.addEventListener("submit", async (event) => {
   answerPanel.classList.add("hidden");
 
   try {
+    const requestBody = { question };
+    askJsonInput.textContent = prettyJson(requestBody);
     const response = await fetch("/ask", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify(requestBody),
     });
 
     const data = await response.json();
