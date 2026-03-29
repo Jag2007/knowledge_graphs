@@ -52,7 +52,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             }
         
         # 2. Split text into chunks (200-400 words)
-        chunks = chunk_text(text, target_words=300, min_words=200, max_words=400)
+        chunks = chunk_text(text, target_words=180, min_words=120, max_words=220, overlap_words=40)
         if not chunks:
             return {
                 "error": "The document could not be split into usable text chunks.",

@@ -5,11 +5,33 @@ from dotenv import load_dotenv
 from utils import (
     extract_first_json,
     normalise_relation_for_llm,
+    split_into_sentences,
 )
 
 load_dotenv()
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+NOISY_RELATIONS = {
+    "OLDEST",
+    "MOST_DIVERSE",
+    "REFLECTS",
+    "BASED_ON",
+    "CONTINUES_TO_EVOLVE",
+    "IMPORTANT",
+    "POPULAR",
+    "FAMOUS",
+    "KNOWN_FOR",
+}
+
+INVALID_OBJECTS = {
+    "world",
+    "company",
+    "organization",
+    "person",
+    "culture",
+    "society",
+}
 
 def clean_and_validate_triples(triples: list) -> list:
     """Validate and clean the LLM-extracted triples."""
@@ -42,9 +64,21 @@ def clean_and_validate_triples(triples: list) -> list:
         if not rel_clean:
             continue
 
+        if rel_clean in NOISY_RELATIONS:
+            continue
+
         # Enforce "1–3 words" relations (heuristic: underscore-separated parts).
         parts = [p for p in rel_clean.split("_") if p]
         if len(parts) < 1 or len(parts) > 3:
+            continue
+
+        if obj.strip().lower() in INVALID_OBJECTS:
+            continue
+
+        if len(obj.split()) > 8:
+            continue
+
+        if obj.strip().lower().endswith(("its", "their", "his", "her", "the", "a", "an")):
             continue
             
         key = (subj.strip().lower(), rel_clean.lower(), obj.strip().lower())
@@ -62,40 +96,38 @@ def clean_and_validate_triples(triples: list) -> list:
         
     return valid_triples
 
+
+def _group_sentences_for_extraction(text: str, group_size: int = 2, max_words: int = 120) -> list[str]:
+    """Split a chunk into smaller sentence groups for more accurate extraction."""
+    sentences = split_into_sentences(text)
+    if not sentences:
+        return [text] if text.strip() else []
+
+    groups = []
+    current = []
+    current_words = 0
+
+    for sentence in sentences:
+        sentence_words = len(sentence.split())
+        if current and (len(current) >= group_size or current_words + sentence_words > max_words):
+            groups.append(" ".join(current).strip())
+            current = [sentence]
+            current_words = sentence_words
+        else:
+            current.append(sentence)
+            current_words += sentence_words
+
+    if current:
+        groups.append(" ".join(current).strip())
+
+    return [group for group in groups if group]
+
 def extract_triples_groq(chunk: str) -> list:
-    """Extract (subject, relation, object) triples using Groq LLM and a strict structured prompt."""
+    """Extract (subject, relation, object) triples using smaller text windows."""
     if not chunk.strip():
         return []
 
     model = os.environ.get("GROQ_TRIPLE_MODEL", "llama-3.1-8b-instant")
-
-    # USE THIS EXACT PROMPT (as provided by the user).
-    base_prompt = f"""You are an expert knowledge extraction system.
-
-Extract factual relationships from the text.
-
-Return ONLY valid JSON.
-
-Format:
-[
-{{"subject": "...", "relation": "...", "object": "..."}}
-]
-
-Rules:
-
-Extract ONLY clear factual relationships
-Keep subject and object short and clean
-Relation must be 1–3 words
-Use UPPERCASE_WITH_UNDERSCORES (e.g., CEO_OF, FOUNDED, BASED_IN)
-DO NOT return explanations
-DO NOT return text outside JSON
-If no relationships exist, return []
-
-Text:
-{chunk}
-"""
-
-    fallback_prompt = f"Extract simple subject-relation-object triples from the text. Return JSON only.\n\nText:\n{chunk}"
 
     def _attempt(prompt: str) -> tuple[list, str]:
         completion = client.chat.completions.create(
@@ -126,11 +158,53 @@ Text:
 
         return cleaned, "ok"
 
-    triples, status = _attempt(base_prompt)
+    all_triples = []
+    seen = set()
+    windows = _group_sentences_for_extraction(chunk)
 
-    # Fallback (critical): if LLM returns empty, retry ONCE with simplified prompt.
-    if status == "empty":
-        triples, _ = _attempt(fallback_prompt)
+    for window in windows:
+        base_prompt = f"""You are an expert knowledge extraction system.
 
-    # If parsing fails -> skip chunk (return []).
-    return triples
+Extract factual knowledge graph triples from the text.
+
+Return ONLY valid JSON.
+
+Format:
+[
+  {{"subject": "...", "relation": "...", "object": "..."}}
+]
+
+Rules:
+- Extract multiple factual triples when they are clearly stated.
+- Keep subject and object short and clean.
+- Relation must be 1-3 words.
+- Use UPPERCASE_WITH_UNDERSCORES.
+- Prefer useful factual relations such as LOCATED_IN, WEARS, CELEBRATES, SPEAKS, INCLUDES, PRACTICES, USES, PLAYS, PERFORMS.
+- Skip vague or descriptive relations like OLDEST, MOST_DIVERSE, IMPORTANT, KNOWN_FOR.
+- Skip incomplete objects or trailing phrases.
+- Do not explain anything.
+- If there are no clear factual triples, return [].
+
+Text:
+{window}
+"""
+
+        fallback_prompt = f"Extract simple subject-relation-object triples from the text. Return JSON only.\n\nText:\n{window}"
+
+        triples, status = _attempt(base_prompt)
+
+        if status == "empty":
+            triples, _ = _attempt(fallback_prompt)
+
+        for triple in triples:
+            key = (
+                triple["subject"].strip().lower(),
+                triple["relation"].strip().lower(),
+                triple["object"].strip().lower(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            all_triples.append(triple)
+
+    return all_triples

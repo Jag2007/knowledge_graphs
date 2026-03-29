@@ -10,8 +10,14 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         text += page.get_text() + "\n"
     return text
 
-def chunk_text(text: str, target_words: int = 300, min_words: int = 200, max_words: int = 400) -> list[str]:
-    """Split text into chunks (200–400 words each when possible)."""
+def chunk_text(
+    text: str,
+    target_words: int = 180,
+    min_words: int = 120,
+    max_words: int = 220,
+    overlap_words: int = 40,
+) -> list[str]:
+    """Split text into smaller overlapping chunks for better extraction quality."""
     words = text.split()
     if not words:
         return []
@@ -19,26 +25,24 @@ def chunk_text(text: str, target_words: int = 300, min_words: int = 200, max_wor
     chunks: list[str] = []
     i = 0
     while i < len(words):
-        # Create a chunk near the target, but never exceed max_words.
         j = min(i + target_words, len(words))
         if j - i > max_words:
             j = i + max_words
         chunk_words = words[i:j]
         if chunk_words:
             chunks.append(" ".join(chunk_words))
-        i = j
+        if j >= len(words):
+            break
+        i = max(j - overlap_words, i + 1)
 
-    # If the last chunk is too small, merge it into the previous one.
     if len(chunks) >= 2:
         last_words = len(chunks[-1].split())
         if last_words < min_words:
             prev_words = len(chunks[-2].split())
-            # Only merge if we stay within the maximum chunk size.
             if prev_words + last_words <= max_words:
                 chunks[-2] = f"{chunks[-2]} {chunks[-1]}".strip()
                 chunks.pop()
 
-    # Final safeguard: ensure no chunk becomes empty.
     return [c for c in chunks if c.strip()]
 
 def split_into_sentences(text: str) -> list[str]:
