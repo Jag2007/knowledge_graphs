@@ -1,5 +1,8 @@
 from pathlib import Path
+import asyncio
+import os
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
@@ -15,6 +18,12 @@ app = FastAPI(title="Knowledge Graph Builder")
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+UPLOAD_TARGET_WORDS = int(os.environ.get("KG_TARGET_WORDS", "550"))
+UPLOAD_MIN_WORDS = int(os.environ.get("KG_MIN_WORDS", "380"))
+UPLOAD_MAX_WORDS = int(os.environ.get("KG_MAX_WORDS", "700"))
+UPLOAD_OVERLAP_WORDS = int(os.environ.get("KG_OVERLAP_WORDS", "80"))
+UPLOAD_WORKERS = max(1, min(2, int(os.environ.get("KG_UPLOAD_WORKERS", "1"))))
 
 class QuestionRequest(BaseModel):
     question: str
@@ -51,8 +60,14 @@ async def upload_pdf(file: UploadFile = File(...)):
                 "trace": "",
             }
         
-        # 2. Split text into chunks (200-400 words)
-        chunks = chunk_text(text, target_words=180, min_words=120, max_words=220, overlap_words=40)
+        # 2. Split text into larger chunks to reduce total LLM calls on big PDFs.
+        chunks = chunk_text(
+            text,
+            target_words=UPLOAD_TARGET_WORDS,
+            min_words=UPLOAD_MIN_WORDS,
+            max_words=UPLOAD_MAX_WORDS,
+            overlap_words=UPLOAD_OVERLAP_WORDS,
+        )
         if not chunks:
             return {
                 "error": "The document could not be split into usable text chunks.",
@@ -63,13 +78,21 @@ async def upload_pdf(file: UploadFile = File(...)):
         extracted_triples_debug = []
         all_triples = []
         seen = set()
+        loop = asyncio.get_running_loop()
+        with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as executor:
+            tasks = [loop.run_in_executor(executor, extract_triples_groq, chunk) for chunk in chunks]
+            raw_batches = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # 3. Process each chunk
-        for chunk in chunks:
-            # Safely extract explicitly validated triples
-            triples = extract_triples_groq(chunk)
-            
-            # 4. Accumulate validated triples (dedup across the whole document)
+        triple_batches: list[list[dict]] = []
+        for batch in raw_batches:
+            if isinstance(batch, Exception):
+                print(f"Chunk extraction failed: {batch}")
+                triple_batches.append([])
+            else:
+                triple_batches.append(batch)
+
+        # 3. Accumulate validated triples (dedup across the whole document)
+        for triples in triple_batches:
             for t in triples:
                 key = (t["subject"].strip().lower(), t["relation"].strip().lower(), t["object"].strip().lower())
                 if key in seen:
@@ -90,6 +113,7 @@ async def upload_pdf(file: UploadFile = File(...)):
                     "chunks_processed": len(chunks),
                     "sample_triples": extracted_triples_debug,
                     "triples_added": triples_added,
+                    "workers_used": UPLOAD_WORKERS,
                 },
             }
         
@@ -104,6 +128,7 @@ async def upload_pdf(file: UploadFile = File(...)):
                 "chunks_processed": len(chunks),
                 "sample_triples": extracted_triples_debug,
                 "triples_added": triples_added,
+                "workers_used": UPLOAD_WORKERS,
             },
         }
 

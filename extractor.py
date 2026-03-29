@@ -1,18 +1,20 @@
+import hashlib
 import json
 import os
+import re
+import threading
+import time
+
 from groq import Groq
 from dotenv import load_dotenv
-from utils import (
-    extract_first_json,
-    normalise_relation_for_llm,
-    split_into_sentences,
-)
+
+from utils import extract_first_json, normalise_relation_for_llm
 
 load_dotenv()
 
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-
 NOISY_RELATIONS = {
+    "IS",
+    "HAS",
     "OLDEST",
     "MOST_DIVERSE",
     "REFLECTS",
@@ -32,6 +34,78 @@ INVALID_OBJECTS = {
     "culture",
     "society",
 }
+
+INVALID_SUBJECTS = {
+    "it",
+    "they",
+    "this",
+    "that",
+    "these",
+    "those",
+    "he",
+    "she",
+    "we",
+    "i",
+    "you",
+}
+
+_EXTRACTION_CACHE: dict[str, list[dict]] = {}
+_REQUEST_LOCK = threading.Lock()
+_LAST_REQUEST_AT = 0.0
+
+
+def _get_client() -> Groq:
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is missing.")
+    return Groq(api_key=api_key)
+
+
+def _extract_retry_delay(error: Exception) -> float:
+    message = str(error)
+    match = re.search(r"try again in ([0-9.]+)s", message, re.IGNORECASE)
+    if match:
+        try:
+            return max(1.0, float(match.group(1)) + 1.0)
+        except ValueError:
+            pass
+    return float(os.environ.get("GROQ_RETRY_DELAY_SECONDS", "12"))
+
+
+def _call_groq_with_retry(client: Groq, *, model: str, prompt: str):
+    global _LAST_REQUEST_AT
+
+    max_retries = max(1, int(os.environ.get("GROQ_MAX_RETRIES", "4")))
+    min_interval = max(0.0, float(os.environ.get("GROQ_MIN_INTERVAL_SECONDS", "1.5")))
+    max_tokens = max(128, int(os.environ.get("GROQ_MAX_OUTPUT_TOKENS", "400")))
+
+    last_error = None
+    for attempt in range(max_retries):
+        with _REQUEST_LOCK:
+            now = time.monotonic()
+            wait_time = min_interval - (now - _LAST_REQUEST_AT)
+            if wait_time > 0:
+                time.sleep(wait_time)
+
+            try:
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                )
+                _LAST_REQUEST_AT = time.monotonic()
+                return completion
+            except Exception as error:
+                _LAST_REQUEST_AT = time.monotonic()
+                last_error = error
+                delay = _extract_retry_delay(error)
+                print(f"Groq request failed (attempt {attempt + 1}/{max_retries}): {error}")
+
+        if attempt < max_retries - 1:
+            time.sleep(delay)
+
+    raise last_error if last_error else RuntimeError("Groq extraction failed.")
 
 def clean_and_validate_triples(triples: list) -> list:
     """Validate and clean the LLM-extracted triples."""
@@ -53,6 +127,9 @@ def clean_and_validate_triples(triples: list) -> list:
 
         # Only accept triples when required fields exist and are non-empty.
         if not subj or not rel or not obj:
+            continue
+
+        if subj.strip().lower() in INVALID_SUBJECTS:
             continue
             
         # Reject subject == object
@@ -97,49 +174,24 @@ def clean_and_validate_triples(triples: list) -> list:
     return valid_triples
 
 
-def _group_sentences_for_extraction(text: str, group_size: int = 2, max_words: int = 120) -> list[str]:
-    """Split a chunk into smaller sentence groups for more accurate extraction."""
-    sentences = split_into_sentences(text)
-    if not sentences:
-        return [text] if text.strip() else []
-
-    groups = []
-    current = []
-    current_words = 0
-
-    for sentence in sentences:
-        sentence_words = len(sentence.split())
-        if current and (len(current) >= group_size or current_words + sentence_words > max_words):
-            groups.append(" ".join(current).strip())
-            current = [sentence]
-            current_words = sentence_words
-        else:
-            current.append(sentence)
-            current_words += sentence_words
-
-    if current:
-        groups.append(" ".join(current).strip())
-
-    return [group for group in groups if group]
-
 def extract_triples_groq(chunk: str) -> list:
-    """Extract (subject, relation, object) triples using smaller text windows."""
-    if not chunk.strip():
+    """Extract triples from one chunk with strict JSON parsing and per-chunk caching."""
+    text = chunk.strip()
+    if not text:
         return []
 
+    cache_key = hashlib.sha1(text.encode("utf-8")).hexdigest()
+    if cache_key in _EXTRACTION_CACHE:
+        return list(_EXTRACTION_CACHE[cache_key])
+
     model = os.environ.get("GROQ_TRIPLE_MODEL", "llama-3.1-8b-instant")
+    client = _get_client()
 
     def _attempt(prompt: str) -> tuple[list, str]:
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=1024,
-        )
+        completion = _call_groq_with_retry(client, model=model, prompt=prompt)
 
         response = completion.choices[0].message.content or ""
-        # Print raw output BEFORE parsing (debug).
-        print("RAW LLM OUTPUT:", response)
+        print("RAW LLM OUTPUT:", response[:500])
 
         # Fallback trigger: empty response.
         if not response.strip():
@@ -158,12 +210,7 @@ def extract_triples_groq(chunk: str) -> list:
 
         return cleaned, "ok"
 
-    all_triples = []
-    seen = set()
-    windows = _group_sentences_for_extraction(chunk)
-
-    for window in windows:
-        base_prompt = f"""You are an expert knowledge extraction system.
+    base_prompt = f"""You are an expert knowledge extraction system.
 
 Extract factual knowledge graph triples from the text.
 
@@ -176,6 +223,7 @@ Format:
 
 Rules:
 - Extract multiple factual triples when they are clearly stated.
+- Return at most 8 triples.
 - Keep subject and object short and clean.
 - Relation must be 1-3 words.
 - Use UPPERCASE_WITH_UNDERSCORES.
@@ -186,25 +234,25 @@ Rules:
 - If there are no clear factual triples, return [].
 
 Text:
-{window}
+{text}
 """
 
-        fallback_prompt = f"Extract simple subject-relation-object triples from the text. Return JSON only.\n\nText:\n{window}"
+    fallback_prompt = f"""Extract knowledge graph triples from the text.
 
-        triples, status = _attempt(base_prompt)
+Return ONLY valid JSON.
 
-        if status == "empty":
-            triples, _ = _attempt(fallback_prompt)
+Format:
+[
+  {{"subject": "...", "relation": "...", "object": "..."}}
+]
 
-        for triple in triples:
-            key = (
-                triple["subject"].strip().lower(),
-                triple["relation"].strip().lower(),
-                triple["object"].strip().lower(),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            all_triples.append(triple)
+Text:
+{text}
+"""
 
-    return all_triples
+    triples, status = _attempt(base_prompt)
+    if status == "empty":
+        triples, _ = _attempt(fallback_prompt)
+
+    _EXTRACTION_CACHE[cache_key] = list(triples)
+    return list(triples)

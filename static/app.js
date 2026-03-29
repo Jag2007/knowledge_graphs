@@ -49,6 +49,10 @@ uploadForm.addEventListener("submit", async (event) => {
 
   uploadStatus.textContent = "Uploading the PDF and building the graph...";
   uploadSummary.classList.add("hidden");
+  uploadJsonContent.textContent = prettyJson({
+    status: "processing",
+    message: "The PDF is being uploaded and processed. Large documents can take a little longer.",
+  });
 
   try {
     const response = await fetch("/upload_pdf", {
@@ -90,6 +94,10 @@ askForm.addEventListener("submit", async (event) => {
   try {
     const requestBody = { question };
     askJsonInput.textContent = prettyJson(requestBody);
+    askJsonContent.textContent = prettyJson({
+      status: "processing",
+      message: "The question is being searched in the knowledge graph.",
+    });
     const response = await fetch("/ask", {
       method: "POST",
       headers: {
