@@ -2,6 +2,7 @@ from pathlib import Path
 import asyncio
 import os
 import traceback
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -13,6 +14,7 @@ from utils import extract_text_from_pdf, chunk_text
 from extractor import extract_triples_groq
 from graph import Neo4jGraph
 from query_engine import ask_question
+from document_store import set_active_document, get_active_document
 
 app = FastAPI(title="Knowledge Graph Builder")
 BASE_DIR = Path(__file__).resolve().parent
@@ -27,6 +29,31 @@ UPLOAD_WORKERS = max(1, min(2, int(os.environ.get("KG_UPLOAD_WORKERS", "1"))))
 
 class QuestionRequest(BaseModel):
     question: str
+
+
+def build_document_summary(file_name: str, triples: list[dict]) -> str:
+    if not triples:
+        return f"The uploaded document {file_name} was processed, but no structured summary could be created."
+
+    topics: list[str] = []
+    seen = set()
+    for triple in triples:
+        for value in (triple.get("subject", ""), triple.get("object", "")):
+            text = str(value).strip().replace("_", " ")
+            key = text.lower()
+            if text and key not in seen:
+                seen.add(key)
+                topics.append(text)
+            if len(topics) >= 6:
+                break
+        if len(topics) >= 6:
+            break
+
+    if not topics:
+        return f"The uploaded document {file_name} contains structured facts."
+    if len(topics) == 1:
+        return f"The uploaded document mainly discusses {topics[0]}."
+    return "The uploaded document mainly discusses " + ", ".join(topics[:-1]) + f", and {topics[-1]}."
 
 
 @app.get("/")
@@ -75,6 +102,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             }
         
         graph = Neo4jGraph()
+        document_id = str(uuid.uuid4())
         extracted_triples_debug = []
         all_triples = []
         seen = set()
@@ -102,7 +130,10 @@ async def upload_pdf(file: UploadFile = File(...)):
                 if len(extracted_triples_debug) < 10:
                     extracted_triples_debug.append((t["subject"], t["relation"], t["object"]))
 
-        triples_added = graph.insert_triples(all_triples)
+        summary = build_document_summary(file.filename, all_triples)
+        graph.store_document(document_id, file.filename, summary)
+        triples_added = graph.insert_triples(all_triples, document_id)
+        set_active_document(document_id, file.filename)
         
         # Failsafe exactly as requested
         if triples_added == 0:
@@ -114,6 +145,7 @@ async def upload_pdf(file: UploadFile = File(...)):
                     "sample_triples": extracted_triples_debug,
                     "triples_added": triples_added,
                     "workers_used": UPLOAD_WORKERS,
+                    "document_id": document_id,
                 },
             }
         
@@ -122,6 +154,8 @@ async def upload_pdf(file: UploadFile = File(...)):
             "file_name": file.filename,
             "chunks_processed": len(chunks),
             "triples_added": triples_added,
+            "document_id": document_id,
+            "summary": summary,
             "sample_triples": extracted_triples_debug,
             "debug": {
                 "file_name": file.filename,
@@ -129,6 +163,8 @@ async def upload_pdf(file: UploadFile = File(...)):
                 "sample_triples": extracted_triples_debug,
                 "triples_added": triples_added,
                 "workers_used": UPLOAD_WORKERS,
+                "document_id": document_id,
+                "summary": summary,
             },
         }
 
@@ -154,7 +190,20 @@ async def ask(q: QuestionRequest):
         raise HTTPException(status_code=400, detail="Please provide a question.")
 
     try:
-        response = ask_question(question)
+        active_document = get_active_document()
+        document_id = str(active_document.get("document_id", "")).strip()
+        if not document_id:
+            return {
+                "query": "",
+                "results": [],
+                "answer": "Please upload a PDF before asking a question.",
+                "debug": {
+                    "question": question,
+                    "error": "No active document found.",
+                },
+            }
+
+        response = ask_question(question, document_id=document_id)
         results = response.get("results", [])
         answer = response.get("answer", "").strip()
 
@@ -175,6 +224,8 @@ async def ask(q: QuestionRequest):
                 "results": results,
                 "steps": response.get("steps_taken", response.get("steps", [])),
                 "triples_added": response.get("triples_added", 0),
+                "document_id": document_id,
+                "active_file_name": active_document.get("file_name", ""),
             },
         }
     except Exception as e:
