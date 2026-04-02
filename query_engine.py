@@ -351,13 +351,46 @@ def _format_direct_results(question: str, results: list[dict], terms: list[str],
             verb = _adjust_verb_for_subject(subject, _verb_from_relation(relation_upper))
             return f"{subject} {verb} {_join_values(values)}."
 
+    lower_question = question.strip().lower()
+    if not relation_hints and (_is_plain_entity_query(question) or lower_question.startswith("what is") or lower_question.startswith("what are")):
+        grouped_by_subject: dict[str, dict[str, list[str]]] = {}
+        for row in sorted(cleaned_rows, key=lambda item: item["score"], reverse=True):
+            subject = row["subject"]
+            relation_upper = row["relation"].replace(" ", "_").upper()
+            grouped_by_subject.setdefault(subject, {})
+            grouped_by_subject[subject].setdefault(relation_upper, [])
+            if row["object"] not in grouped_by_subject[subject][relation_upper]:
+                grouped_by_subject[subject][relation_upper].append(row["object"])
+
+        best_subject = max(
+            grouped_by_subject.keys(),
+            key=lambda subject: (
+                sum(len(values) for values in grouped_by_subject[subject].values()),
+                sum(1 for term in terms if term.lower() in subject.lower()),
+            ),
+        )
+
+        ordered_relations = [rel for rel in SUMMARY_RELATION_ORDER if rel in grouped_by_subject[best_subject]]
+        ordered_relations.extend(
+            rel for rel in grouped_by_subject[best_subject].keys()
+            if rel not in ordered_relations
+        )
+        lines = []
+        for relation_upper in ordered_relations:
+            values = grouped_by_subject[best_subject][relation_upper]
+            verb = _adjust_verb_for_subject(best_subject, _verb_from_relation(relation_upper))
+            lines.append(f"{best_subject} {verb} {_join_values(values)}")
+        if lines:
+            if len(lines) == 1:
+                return lines[0] + "."
+            return "Based on the uploaded document: " + "; ".join(lines) + "."
+
     best = sorted(
         cleaned_rows,
         key=lambda row: (row["score"], len(row["subject"]) + len(row["object"])),
         reverse=True,
     )[0]
 
-    lower_question = question.strip().lower()
     if lower_question.startswith("who is"):
         return _sentence_from_relation(best["subject"], best["relation"], best["object"], question, terms)
     if lower_question.startswith("what is"):
@@ -676,7 +709,7 @@ def ask_question(question: str, document_id: str) -> dict:
         entity_cypher, entity_candidates = graph.find_relevant_entities(entity_search_terms, document_id, limit=12)
         anchor_entities = _rank_anchor_entities(terms or expanded_terms, entity_phrases, entity_candidates)
         for anchor_entity in anchor_entities[:5]:
-            neighborhood_cypher, neighborhood_rows = graph.get_entity_neighborhood(anchor_entity, document_id, limit=20)
+            neighborhood_cypher, neighborhood_rows = graph.get_entity_neighborhood(anchor_entity, document_id, limit=200)
             if not neighborhood_rows:
                 continue
             neighborhood_answer = _format_entity_neighborhood(
