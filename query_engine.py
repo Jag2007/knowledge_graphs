@@ -175,6 +175,46 @@ def _sentence_from_relation(subject: str, relation: str, object_: str, question:
     return f"{subject} {relation} {object_}."
 
 
+def _sentence_from_inverse_relation(anchor: str, subject: str, relation: str) -> str:
+    """Render a natural sentence when the anchor is on the object side of a relation."""
+    relation_upper = relation.replace(" ", "_").upper()
+
+    if relation_upper in {"INCLUDES", "CONTAINS", "HAS"}:
+        verb = "are included in" if anchor.strip().lower().endswith("s") else "is included in"
+        return f"{anchor} {verb} {subject}"
+
+    if relation_upper == "CELEBRATES":
+        return f"{anchor} is celebrated by {subject}"
+
+    if relation_upper == "REFLECTS":
+        return f"{anchor} is reflected by {subject}"
+
+    if relation_upper == "PRACTICES":
+        return f"{anchor} is practiced in {subject}"
+
+    if relation_upper == "WEARS":
+        return f"{anchor} is worn in {subject}"
+
+    if relation_upper in {"LOCATED_IN", "BASED_IN"}:
+        return f"{subject} is located in {anchor}"
+
+    if relation_upper == "FOUNDED":
+        return f"{anchor} was founded by {subject}"
+
+    if relation_upper == "FOUNDED_BY":
+        return f"{subject} was founded by {anchor}"
+
+    if relation_upper.startswith("HAS_"):
+        role = relation_upper[4:].replace("_", " ").lower()
+        return f"{anchor} is the {role} of {subject}"
+
+    if relation_upper.endswith("_OF"):
+        role = relation_upper[:-3].replace("_", " ").lower()
+        return f"{subject} is the {role} of {anchor}"
+
+    return f"{subject} {_adjust_verb_for_subject(subject, _verb_from_relation(relation_upper))} {anchor}"
+
+
 def _extract_terms(question: str) -> list[str]:
     """Extract useful search terms without hardcoding any domain entities."""
     if not question.strip():
@@ -702,15 +742,7 @@ def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], te
             verb = _adjust_verb_for_subject(anchor, _verb_from_relation(relation))
             line = f"{anchor} {verb} {object_}"
         elif object_.lower() == lowered_anchor:
-            relation_upper = relation.replace(" ", "_").upper()
-            if relation_upper.startswith("HAS_"):
-                role = relation_upper[4:].replace("_", " ").lower()
-                line = f"{anchor} is the {role} of {subject}"
-            elif relation_upper.endswith("_OF"):
-                role = relation_upper[:-3].replace("_", " ").lower()
-                line = f"{subject} is the {role} of {anchor}"
-            else:
-                line = f"{anchor} is related to {subject} through {_verb_from_relation(relation)}"
+            line = _sentence_from_inverse_relation(anchor, subject, relation)
         else:
             continue
 

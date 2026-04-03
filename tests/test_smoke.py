@@ -404,6 +404,19 @@ class AppSmokeTests(unittest.TestCase):
             "Elon Musk founded SpaceX, and SpaceX is located in USA.",
         )
 
+    def test_inverse_relation_answer_is_grammatically_natural(self):
+        app.extract_text_from_pdf = lambda _: "Indian cuisine includes vegetables."
+        app.extract_triples_groq = lambda chunk: [
+            {"subject": "Indian Cuisine", "relation": "INCLUDES", "object": "Vegetables"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("food.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "what are vegetables"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertEqual(
+            ask.json()["answer"],
+            "Vegetables are included in Indian Cuisine.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
