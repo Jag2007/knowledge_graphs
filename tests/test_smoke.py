@@ -387,6 +387,23 @@ class AppSmokeTests(unittest.TestCase):
             "Based on the uploaded document: Indian Culture reflects Unity In Diversity; Indian Culture celebrates Family and Hospitality; Indian Culture practices Yoga.",
         )
 
+    def test_indirect_multi_hop_query_uses_path_chain(self):
+        app.extract_text_from_pdf = lambda _: "Elon Musk founded SpaceX. SpaceX is based in USA."
+        app.extract_triples_groq = lambda chunk: [
+            {"subject": "Elon Musk", "relation": "FOUNDED", "object": "SpaceX"},
+            {"subject": "SpaceX", "relation": "BASED_IN", "object": "USA"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("spacex.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post(
+            "/ask",
+            json={"question": "where is the company founded by elon musk based"},
+        )
+        self.assertEqual(ask.status_code, 200)
+        self.assertEqual(
+            ask.json()["answer"],
+            "Elon Musk founded SpaceX, and SpaceX is located in USA.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

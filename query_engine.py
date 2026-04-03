@@ -127,6 +127,8 @@ def _clean_entity_text(value: str) -> str:
     if not text:
         return ""
     if text.isupper():
+        if len(text) <= 4:
+            return text
         return text.title()
     return text
 
@@ -159,6 +161,10 @@ def _sentence_from_relation(subject: str, relation: str, object_: str, question:
 
     if relation_upper in {"LOCATED_IN", "BASED_IN"}:
         return f"{subject} is located in {object_}."
+
+    if relation_upper in {"FOUNDED", "FOUNDED_BY", "CELEBRATES", "INCLUDES", "PRACTICES", "WEARS", "REFLECTS"}:
+        verb = _adjust_verb_for_subject(subject, _verb_from_relation(relation_upper))
+        return f"{subject} {verb} {object_}."
 
     if question.strip().lower().startswith("who is") and term_hits_object > term_hits_subject:
         return f"{object_} is related to {subject} through {relation}."
@@ -253,6 +259,21 @@ def _extract_relation_hints(question: str) -> set[str]:
     return hints
 
 
+def _extract_relation_groups(question: str) -> list[set[str]]:
+    groups: list[set[str]] = []
+    seen = set()
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", question.lower()):
+        relation_group = RELATION_HINTS.get(token)
+        if not relation_group:
+            continue
+        key = tuple(sorted(relation_group))
+        if key in seen:
+            continue
+        seen.add(key)
+        groups.append(set(relation_group))
+    return groups
+
+
 def _is_overview_question(question: str) -> bool:
     text = question.strip().lower()
     patterns = [
@@ -278,6 +299,21 @@ def _is_node_overview_question(question: str) -> bool:
 def _is_plain_entity_query(question: str) -> bool:
     tokens = [token for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", question.lower()) if token not in STOP_WORDS]
     return bool(tokens) and len(tokens) <= 4 and "?" not in question
+
+
+def _is_multi_hop_question(question: str, relation_groups: list[set[str]]) -> bool:
+    """Detect questions that likely need a path chain instead of one local edge."""
+    text = question.strip().lower()
+    if len(relation_groups) >= 2:
+        return True
+    chain_markers = [
+        "founded by",
+        "based in",
+        "located in",
+        "connected to",
+        "related to",
+    ]
+    return any(marker in text for marker in chain_markers) and "where" in text
 
 
 def _score_direct_row(row: dict, terms: list[str]) -> int:
@@ -350,6 +386,7 @@ def _format_direct_results(question: str, results: list[dict], terms: list[str],
                 return f"{subject} is located in {values[0]}."
             verb = _adjust_verb_for_subject(subject, _verb_from_relation(relation_upper))
             return f"{subject} {verb} {_join_values(values)}."
+        return ""
 
     lower_question = question.strip().lower()
     if not relation_hints and (_is_plain_entity_query(question) or lower_question.startswith("what is") or lower_question.startswith("what are")):
@@ -400,34 +437,62 @@ def _format_direct_results(question: str, results: list[dict], terms: list[str],
     return _sentence_from_relation(best["subject"], best["relation"], best["object"], question, terms)
 
 
-def _format_path_results(results: list[dict]) -> str:
+def _score_path_row(row: dict, terms: list[str], relation_hints: set[str]) -> int:
+    nodes = [_clean_entity_text(name).lower() for name in row.get("path_nodes", []) if _clean_entity_text(name)]
+    relations = [str(rel).strip().replace(" ", "_").upper() for rel in row.get("path_relationships", []) if str(rel).strip()]
+    score = 0
+    for relation in relations:
+        if relation in relation_hints:
+            score += 8
+    for term in terms:
+        token = term.lower()
+        for node in nodes:
+            if token in node:
+                score += 2
+        for relation in relations:
+            if token in _relation_to_text(relation).lower():
+                score += 2
+    score += len(relations)
+    return score
+
+
+def _format_path_results(results: list[dict], terms: list[str], relation_hints: set[str]) -> str:
+    ranked_rows = sorted(
+        results,
+        key=lambda row: _score_path_row(row, terms, relation_hints),
+        reverse=True,
+    )
     lines: list[str] = []
     seen = set()
 
-    for row in results:
+    for row in ranked_rows:
         nodes = [_clean_entity_text(name) for name in row.get("path_nodes", []) if _clean_entity_text(name)]
         relations = [str(rel).strip() for rel in row.get("path_relationships", []) if str(rel).strip()]
         if len(nodes) < 2 or not relations:
             continue
 
-        parts = [nodes[0]]
+        parts = []
         for idx, relation in enumerate(relations):
             if idx + 1 >= len(nodes):
                 break
-            parts.append(_relation_to_text(relation))
-            parts.append(nodes[idx + 1])
+            subject = nodes[idx]
+            object_ = nodes[idx + 1]
+            phrase = _sentence_from_relation(subject, relation, object_, "", [])
+            parts.append(phrase.rstrip("."))
 
-        line = " ".join(parts)
+        line = ", and ".join(parts)
         key = line.lower()
         if key in seen:
             continue
         seen.add(key)
         lines.append(line)
-        if len(lines) >= 6:
+        if len(lines) >= 3:
             break
 
     if not lines:
         return ""
+    if len(lines) == 1:
+        return lines[0] + "."
     return "Based on the uploaded document: " + "; ".join(lines) + "."
 
 
@@ -529,7 +594,7 @@ def _score_neighborhood_row(row: dict, anchor: str, terms: list[str], relation_h
     return score
 
 
-def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], terms: list[str], relation_hints: set[str]) -> str:
+def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], terms: list[str], relation_hints: set[str], relation_groups: list[set[str]]) -> str:
     facts: list[str] = []
     seen = set()
     lowered_anchor = anchor.lower()
@@ -555,6 +620,11 @@ def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], te
                 grouped_objects[relation_upper].append(object_)
 
     lower_question = question.strip().lower()
+    if relation_groups:
+        available_relations = set(grouped_objects.keys())
+        if not all(group & available_relations for group in relation_groups):
+            return ""
+
     if relation_hints & {"HAS_CAPITAL", "CAPITAL", "CAPITAL_OF"}:
         if "HAS_CAPITAL" in grouped_objects:
             value = grouped_objects["HAS_CAPITAL"][0]
@@ -671,6 +741,8 @@ def ask_question(question: str, document_id: str) -> dict:
         entity_phrases = _extract_entity_phrases(question)
         expanded_terms = _expand_terms(terms)
         relation_hints = _extract_relation_hints(question)
+        relation_groups = _extract_relation_groups(question)
+        should_use_multi_hop = _is_multi_hop_question(question, relation_groups)
 
         if _is_overview_question(question):
             summary = graph.get_document_summary(document_id)
@@ -705,6 +777,26 @@ def ask_question(question: str, document_id: str) -> dict:
                     ],
                 }
 
+        path_cypher = ""
+        if should_use_multi_hop:
+            path_cypher, path_results = graph.search_paths(expanded_terms, document_id, max_hops=3, limit=80)
+            path_answer = _format_path_results(path_results, expanded_terms, relation_hints) if path_results else ""
+            if path_answer:
+                return {
+                    "triples_added": total_triples,
+                    "query": path_cypher,
+                    "results": path_results,
+                    "answer": path_answer,
+                    "steps_taken": [
+                        {
+                            "step": "multi_hop_lookup",
+                            "terms": expanded_terms,
+                            "relation_hints": sorted(relation_hints),
+                            "matches": len(path_results),
+                        }
+                    ],
+                }
+
         entity_search_terms = entity_phrases + (terms or expanded_terms)
         entity_cypher, entity_candidates = graph.find_relevant_entities(entity_search_terms, document_id, limit=12)
         anchor_entities = _rank_anchor_entities(terms or expanded_terms, entity_phrases, entity_candidates)
@@ -712,12 +804,14 @@ def ask_question(question: str, document_id: str) -> dict:
             neighborhood_cypher, neighborhood_rows = graph.get_entity_neighborhood(anchor_entity, document_id, limit=200)
             if not neighborhood_rows:
                 continue
+
             neighborhood_answer = _format_entity_neighborhood(
                 question,
                 anchor_entity,
                 neighborhood_rows,
                 expanded_terms,
                 relation_hints,
+                relation_groups,
             )
             if not neighborhood_answer:
                 continue
@@ -744,51 +838,58 @@ def ask_question(question: str, document_id: str) -> dict:
 
         direct_cypher, direct_results = graph.search_related(expanded_terms, document_id, limit=25)
         if direct_results:
-            return {
-                "triples_added": total_triples,
-                "query": direct_cypher,
-                "results": direct_results,
-                "answer": _format_direct_results(question, direct_results, expanded_terms, relation_hints),
-                "steps_taken": [
-                    {
-                        "step": "one_hop_lookup",
-                        "terms": expanded_terms,
-                        "matches": len(direct_results),
-                    }
-                ],
-            }
+            direct_answer = _format_direct_results(question, direct_results, expanded_terms, relation_hints)
+            if direct_answer:
+                return {
+                    "triples_added": total_triples,
+                    "query": direct_cypher,
+                    "results": direct_results,
+                    "answer": direct_answer,
+                    "steps_taken": [
+                        {
+                            "step": "one_hop_lookup",
+                            "terms": expanded_terms,
+                            "matches": len(direct_results),
+                        }
+                    ],
+                }
 
         semantic_cypher, semantic_results = graph.search_semantic(expanded_terms, document_id, limit=40)
         if semantic_results:
-            return {
-                "triples_added": total_triples,
-                "query": semantic_cypher,
-                "results": semantic_results,
-                "answer": _format_direct_results(question, semantic_results, expanded_terms, relation_hints),
-                "steps_taken": [
-                    {
-                        "step": "semantic_lookup",
-                        "terms": expanded_terms,
-                        "matches": len(semantic_results),
-                    }
-                ],
-            }
+            semantic_answer = _format_direct_results(question, semantic_results, expanded_terms, relation_hints)
+            if semantic_answer:
+                return {
+                    "triples_added": total_triples,
+                    "query": semantic_cypher,
+                    "results": semantic_results,
+                    "answer": semantic_answer,
+                    "steps_taken": [
+                        {
+                            "step": "semantic_lookup",
+                            "terms": expanded_terms,
+                            "matches": len(semantic_results),
+                        }
+                    ],
+                }
 
-        path_cypher, path_results = graph.search_paths(expanded_terms, document_id, max_hops=2, limit=20)
+        path_cypher, path_results = graph.search_paths(expanded_terms, document_id, max_hops=3, limit=80)
         if path_results:
-            return {
+            path_answer = _format_path_results(path_results, expanded_terms, relation_hints)
+            if path_answer:
+                return {
                 "triples_added": total_triples,
                 "query": path_cypher,
                 "results": path_results,
-                "answer": _format_path_results(path_results),
+                "answer": path_answer,
                 "steps_taken": [
                     {
-                        "step": "two_hop_lookup",
+                        "step": "multi_hop_lookup",
                         "terms": expanded_terms,
+                        "relation_hints": sorted(relation_hints),
                         "matches": len(path_results),
                     }
                 ],
-            }
+                }
 
         return {
             "triples_added": total_triples,
