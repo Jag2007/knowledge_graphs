@@ -58,6 +58,8 @@ GENERIC_NODE_PATTERNS = [
 ]
 
 RELATION_HINTS = {
+    "adopt": {"ADOPTED", "ADOPTED_ON"},
+    "adopted": {"ADOPTED", "ADOPTED_ON"},
     "include": {"INCLUDES"},
     "includes": {"INCLUDES"},
     "capital": {"HAS_CAPITAL", "CAPITAL", "CAPITAL_OF"},
@@ -95,6 +97,8 @@ def _verb_from_relation(relation: str) -> str:
         "CAPITAL_OF": "is the capital of",
         "LOCATED_IN": "is located in",
         "BASED_IN": "is based in",
+        "ADOPTED": "adopted",
+        "ADOPTED_ON": "was adopted on",
         "INCLUDES": "includes",
         "WEARS": "wears",
         "PRACTICES": "practices",
@@ -164,6 +168,9 @@ def _sentence_from_relation(subject: str, relation: str, object_: str, question:
     if relation_upper in {"LOCATED_IN", "BASED_IN"}:
         return f"{subject} is located in {object_}."
 
+    if relation_upper == "ADOPTED_ON":
+        return f"{subject} was adopted on {object_}."
+
     if relation_upper in {"FOUNDED", "FOUNDED_BY", "CELEBRATES", "INCLUDES", "PRACTICES", "WEARS", "REFLECTS"}:
         verb = _adjust_verb_for_subject(subject, _verb_from_relation(relation_upper))
         return f"{subject} {verb} {object_}."
@@ -205,6 +212,12 @@ def _sentence_from_inverse_relation(anchor: str, subject: str, relation: str) ->
 
     if relation_upper == "FOUNDED_BY":
         return f"{subject} was founded by {anchor}"
+
+    if relation_upper == "ADOPTED":
+        return f"{anchor} was adopted by {subject}"
+
+    if relation_upper == "ADOPTED_ON":
+        return f"{subject} was adopted on {anchor}"
 
     if relation_upper.startswith("HAS_"):
         role = relation_upper[4:].replace("_", " ").lower()
@@ -696,6 +709,11 @@ def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], te
                     return f"{anchor} is located in {grouped_objects[relation_key][0]}."
         if relation_hints & {"PRACTICES"} and "PRACTICES" in grouped_objects:
             return f"{anchor} practices {_join_values(grouped_objects['PRACTICES'])}."
+        if relation_hints & {"ADOPTED", "ADOPTED_ON"}:
+            if "ADOPTED_ON" in grouped_objects and grouped_objects["ADOPTED_ON"]:
+                return f"{anchor} was adopted on {_join_values(grouped_objects['ADOPTED_ON'])}."
+            if "ADOPTED" in grouped_objects and grouped_objects["ADOPTED"]:
+                return f"{anchor} adopted {_join_values(grouped_objects['ADOPTED'])}."
         if relation_hints & {"WEARS"} and "WEARS" in grouped_objects:
             return f"{anchor} wears {_join_values(grouped_objects['WEARS'])}."
         if relation_hints & {"FOUNDED", "FOUNDED_BY"}:

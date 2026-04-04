@@ -84,7 +84,7 @@ def _call_groq_with_retry(client: Groq, *, model: str, prompt: str):
 
     max_retries = max(1, int(os.environ.get("GROQ_MAX_RETRIES", "4")))
     min_interval = max(0.0, float(os.environ.get("GROQ_MIN_INTERVAL_SECONDS", "1.5")))
-    max_tokens = max(128, int(os.environ.get("GROQ_MAX_OUTPUT_TOKENS", "400")))
+    max_tokens = max(256, int(os.environ.get("GROQ_MAX_OUTPUT_TOKENS", "900")))
 
     last_error = None
     for attempt in range(max_retries):
@@ -236,11 +236,11 @@ Format:
 
 Rules:
 - Extract multiple factual triples when they are clearly stated.
-- Return at most 8 triples.
+- Return as many clearly supported triples as possible, up to 20 triples.
 - Keep subject and object short and clean.
 - Relation must be 1-3 words.
 - Use UPPERCASE_WITH_UNDERSCORES.
-- Prefer useful factual relations such as LOCATED_IN, WEARS, CELEBRATES, SPEAKS, INCLUDES, PRACTICES, USES, REFLECTS, GUARANTEES, PROTECTS, DRAFTED, MEMBER_OF.
+- Prefer useful factual relations such as LOCATED_IN, WEARS, CELEBRATES, SPEAKS, INCLUDES, PRACTICES, USES, REFLECTS, GUARANTEES, PROTECTS, DRAFTED, MEMBER_OF, ADOPTED, ADOPTED_ON, CONVENED_IN.
 - Avoid vague predicate wording like PLAYS, HAS, IS, ARE, IMPORTANT_ROLE, or very long relation names.
 - Skip weak descriptive relations like OLDEST, MOST_DIVERSE, IMPORTANT, KNOWN_FOR.
 - Skip incomplete objects or trailing phrases.

@@ -18,23 +18,51 @@ def chunk_text(
     max_words: int = 220,
     overlap_words: int = 40,
 ) -> list[str]:
-    """Split text into smaller overlapping chunks for better extraction quality."""
-    words = text.split()
-    if not words:
+    """Split text into overlapping sentence-aware chunks for better extraction quality."""
+    sentences = split_into_sentences(text)
+    if not sentences:
         return []
 
     chunks: list[str] = []
-    i = 0
-    while i < len(words):
-        j = min(i + target_words, len(words))
-        if j - i > max_words:
-            j = i + max_words
-        chunk_words = words[i:j]
-        if chunk_words:
-            chunks.append(" ".join(chunk_words))
-        if j >= len(words):
-            break
-        i = max(j - overlap_words, i + 1)
+    current_sentences: list[str] = []
+    current_word_count = 0
+
+    def flush_chunk() -> None:
+        nonlocal current_sentences, current_word_count
+        chunk = " ".join(current_sentences).strip()
+        if chunk:
+            chunks.append(chunk)
+
+        overlap_buffer: list[str] = []
+        overlap_count = 0
+        for previous_sentence in reversed(current_sentences):
+            previous_count = len(previous_sentence.split())
+            if overlap_buffer and overlap_count + previous_count > overlap_words:
+                break
+            overlap_buffer.insert(0, previous_sentence)
+            overlap_count += previous_count
+
+        current_sentences = overlap_buffer
+        current_word_count = overlap_count
+
+    for sentence in sentences:
+        sentence_word_count = len(sentence.split())
+        if sentence_word_count == 0:
+            continue
+
+        if current_sentences and current_word_count + sentence_word_count > max_words:
+            flush_chunk()
+
+        current_sentences.append(sentence)
+        current_word_count += sentence_word_count
+
+        if current_word_count >= target_words:
+            flush_chunk()
+
+    if current_sentences:
+        chunk = " ".join(current_sentences).strip()
+        if chunk:
+            chunks.append(chunk)
 
     if len(chunks) >= 2:
         last_words = len(chunks[-1].split())
@@ -44,7 +72,16 @@ def chunk_text(
                 chunks[-2] = f"{chunks[-2]} {chunks[-1]}".strip()
                 chunks.pop()
 
-    return [c for c in chunks if c.strip()]
+    deduped_chunks: list[str] = []
+    seen = set()
+    for chunk in chunks:
+        normalized = re.sub(r"\s+", " ", chunk).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped_chunks.append(normalized)
+
+    return deduped_chunks
 
 def split_into_sentences(text: str) -> list[str]:
     """Split text into a list of sentences cleanly. (Legacy)"""

@@ -446,6 +446,21 @@ class AppSmokeTests(unittest.TestCase):
             "It is not in the uploaded document. Please check the text.",
         )
 
+    def test_adopted_query_uses_adopted_on_relation(self):
+        app.extract_text_from_pdf = lambda _: "The Constituent Assembly drafted the Indian Constitution. The Indian Constitution was adopted on 26 November 1949."
+        app.extract_triples_groq = lambda chunk: [
+            {"subject": "Constituent Assembly", "relation": "DRAFTED", "object": "Indian Constitution"},
+            {"subject": "Constituent Assembly", "relation": "CONVENED_IN", "object": "December 1946"},
+            {"subject": "Indian Constitution", "relation": "ADOPTED_ON", "object": "26 November 1949"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "Constituent Assembly adopted on"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertEqual(
+            ask.json()["answer"],
+            "Indian Constitution was adopted on 26 November 1949.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

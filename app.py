@@ -21,10 +21,10 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-UPLOAD_TARGET_WORDS = int(os.environ.get("KG_TARGET_WORDS", "550"))
-UPLOAD_MIN_WORDS = int(os.environ.get("KG_MIN_WORDS", "380"))
-UPLOAD_MAX_WORDS = int(os.environ.get("KG_MAX_WORDS", "700"))
-UPLOAD_OVERLAP_WORDS = int(os.environ.get("KG_OVERLAP_WORDS", "80"))
+UPLOAD_TARGET_WORDS = int(os.environ.get("KG_TARGET_WORDS", "420"))
+UPLOAD_MIN_WORDS = int(os.environ.get("KG_MIN_WORDS", "260"))
+UPLOAD_MAX_WORDS = int(os.environ.get("KG_MAX_WORDS", "540"))
+UPLOAD_OVERLAP_WORDS = int(os.environ.get("KG_OVERLAP_WORDS", "70"))
 UPLOAD_WORKERS = max(1, min(2, int(os.environ.get("KG_UPLOAD_WORKERS", "1"))))
 
 class QuestionRequest(BaseModel):
