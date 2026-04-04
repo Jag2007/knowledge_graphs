@@ -139,7 +139,7 @@ class Neo4jGraph:
         WITH e, toLower(e.name) AS lowered_name
         WHERE ANY(term IN $terms WHERE lowered_name CONTAINS term)
         RETURN e.name AS entity_name
-        ORDER BY size(e.name) DESC
+        ORDER BY size(e.name) ASC, e.name ASC
         LIMIT $limit
         """.strip()
         if not cleaned_terms or not document_id:

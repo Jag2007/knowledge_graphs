@@ -40,6 +40,7 @@ STOP_WORDS = {
     "pdf",
     "document",
     "file",
+    "form",
 }
 
 QUESTION_SYNONYMS = {
@@ -58,8 +59,6 @@ GENERIC_NODE_PATTERNS = [
 ]
 
 RELATION_HINTS = {
-    "adopt": {"ADOPTED", "ADOPTED_ON"},
-    "adopted": {"ADOPTED", "ADOPTED_ON"},
     "include": {"INCLUDES"},
     "includes": {"INCLUDES"},
     "capital": {"HAS_CAPITAL", "CAPITAL", "CAPITAL_OF"},
@@ -73,6 +72,10 @@ RELATION_HINTS = {
     "practices": {"PRACTICES"},
     "found": {"FOUNDED", "FOUNDED_BY"},
     "founded": {"FOUNDED", "FOUNDED_BY"},
+    "father": {"KNOWN_AS"},
+    "known": {"KNOWN_AS"},
+    "allow": {"DOES_NOT_ALLOW"},
+    "allows": {"DOES_NOT_ALLOW"},
 }
 
 SUMMARY_RELATION_ORDER = [
@@ -85,29 +88,33 @@ SUMMARY_RELATION_ORDER = [
     "BASED_IN",
 ]
 
+MAX_ENTITY_NAME_WORDS = 8
+
 
 def _relation_to_text(relation: str) -> str:
     return relation.replace("_", " ").strip().lower()
 
 
 def _verb_from_relation(relation: str) -> str:
-    relation_upper = relation.replace(" ", "_").upper()
+    relation_upper = str(relation or "").strip().replace(" ", "_").upper()
     mapping = {
         "HAS_CAPITAL": "has capital",
         "CAPITAL_OF": "is the capital of",
         "LOCATED_IN": "is located in",
         "BASED_IN": "is based in",
-        "ADOPTED": "adopted",
-        "ADOPTED_ON": "was adopted on",
         "INCLUDES": "includes",
         "WEARS": "wears",
         "PRACTICES": "practices",
         "CELEBRATES": "celebrates",
         "FOUNDED": "founded",
         "FOUNDED_BY": "was founded by",
+        "DRAFTED": "drafted",
+        "CONVENED_IN": "convened in",
         "CHAIRMAN_OF": "is the chairman of",
         "CEO_OF": "is the CEO of",
         "REFLECTS": "reflects",
+        "KNOWN_AS": "is known as",
+        "DOES_NOT_ALLOW": "does not allow",
         "REPRESENTS": "represents",
         "KNOWN_FOR": "is known for",
     }
@@ -146,8 +153,32 @@ def _normalize_token(value: str) -> str:
     return token
 
 
+def _tokenize_value(value: str) -> list[str]:
+    return [
+        _normalize_token(token)
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", str(value or "").lower())
+        if token and _normalize_token(token)
+    ]
+
+
+def _entity_name_quality(name: str) -> int:
+    tokens = _tokenize_value(name)
+    if not tokens:
+        return -100
+    score = 0
+    if len(tokens) <= 4:
+        score += 4
+    elif len(tokens) > MAX_ENTITY_NAME_WORDS:
+        score -= 8
+    if any(token in {"constitution", "assembly", "government", "parliamentary", "culture", "tradition"} for token in tokens):
+        score += 2
+    if any(len(token) > 16 for token in tokens):
+        score -= 2
+    return score
+
+
 def _sentence_from_relation(subject: str, relation: str, object_: str, question: str, terms: list[str]) -> str:
-    relation_upper = relation.replace(" ", "_").upper()
+    relation_upper = str(relation or "").strip().replace(" ", "_").upper()
     term_hits_subject = sum(1 for term in terms if term.lower() in subject.lower())
     term_hits_object = sum(1 for term in terms if term.lower() in object_.lower())
 
@@ -171,7 +202,18 @@ def _sentence_from_relation(subject: str, relation: str, object_: str, question:
     if relation_upper == "ADOPTED_ON":
         return f"{subject} was adopted on {object_}."
 
-    if relation_upper in {"FOUNDED", "FOUNDED_BY", "CELEBRATES", "INCLUDES", "PRACTICES", "WEARS", "REFLECTS"}:
+    if relation_upper in {
+        "ADOPTED",
+        "FOUNDED",
+        "FOUNDED_BY",
+        "DRAFTED",
+        "CONVENED_IN",
+        "CELEBRATES",
+        "INCLUDES",
+        "PRACTICES",
+        "WEARS",
+        "REFLECTS",
+    }:
         verb = _adjust_verb_for_subject(subject, _verb_from_relation(relation_upper))
         return f"{subject} {verb} {object_}."
 
@@ -186,7 +228,7 @@ def _sentence_from_relation(subject: str, relation: str, object_: str, question:
 
 def _sentence_from_inverse_relation(anchor: str, subject: str, relation: str) -> str:
     """Render a natural sentence when the anchor is on the object side of a relation."""
-    relation_upper = relation.replace(" ", "_").upper()
+    relation_upper = str(relation or "").strip().replace(" ", "_").upper()
 
     if relation_upper in {"INCLUDES", "CONTAINS", "HAS"}:
         verb = "are included in" if anchor.strip().lower().endswith("s") else "is included in"
@@ -212,12 +254,6 @@ def _sentence_from_inverse_relation(anchor: str, subject: str, relation: str) ->
 
     if relation_upper == "FOUNDED_BY":
         return f"{subject} was founded by {anchor}"
-
-    if relation_upper == "ADOPTED":
-        return f"{anchor} was adopted by {subject}"
-
-    if relation_upper == "ADOPTED_ON":
-        return f"{subject} was adopted on {anchor}"
 
     if relation_upper.startswith("HAS_"):
         role = relation_upper[4:].replace("_", " ").lower()
@@ -364,13 +400,15 @@ def _is_multi_hop_question(question: str, relation_groups: list[set[str]]) -> bo
     if len(relation_groups) >= 2:
         return True
     chain_markers = [
+        "adopted on",
+        "adopted by",
         "founded by",
         "based in",
         "located in",
         "connected to",
         "related to",
     ]
-    return any(marker in text for marker in chain_markers) and "where" in text
+    return any(marker in text for marker in chain_markers)
 
 
 def _score_direct_row(row: dict, terms: list[str]) -> int:
@@ -378,21 +416,32 @@ def _score_direct_row(row: dict, terms: list[str]) -> int:
     object_ = _clean_entity_text(row.get("to_name", "")).lower()
     relation = _relation_to_text(str(row.get("relation_type", "")).strip())
     searchable_text = str(row.get("searchable_text", "")).lower()
+    subject_tokens = set(_tokenize_value(subject))
+    object_tokens = set(_tokenize_value(object_))
+    relation_tokens = set(_tokenize_value(relation))
     score = 0
 
     for term in terms:
-        token = term.lower()
-        if token in subject:
+        token = _normalize_token(term)
+        if token in subject_tokens:
             score += 3
-        if token in object_:
+        elif token and token in subject:
+            score += 1
+        if token in object_tokens:
             score += 3
-        if token in relation:
+        elif token and token in object_:
+            score += 1
+        if token in relation_tokens:
             score += 2
-        if token in searchable_text:
+        elif token and token in relation:
+            score += 1
+        if token and token in searchable_text:
             score += 1
 
     if subject and object_:
         score += 1
+    score += _entity_name_quality(subject)
+    score += _entity_name_quality(object_)
     return score
 
 
@@ -593,25 +642,33 @@ def _rank_anchor_entities(terms: list[str], phrases: list[str], candidates: list
         name = _clean_entity_text(candidate.get("entity_name", ""))
         lowered = name.lower()
         normalized_name = _normalize_token(name)
+        name_tokens = set(_tokenize_value(name))
         score = 0
         for phrase in phrases:
             phrase_lower = phrase.lower()
             normalized_phrase = _normalize_token(phrase)
+            phrase_tokens = [token for token in _tokenize_value(phrase) if token not in STOP_WORDS]
             if phrase_lower == lowered:
-                score += 12
+                score += 16
             elif normalized_phrase == normalized_name:
-                score += 10
+                score += 14
+            elif phrase_tokens and all(token in name_tokens for token in phrase_tokens):
+                score += 12 + len(phrase_tokens)
+            elif phrase_tokens and len(phrase_tokens) > 1 and not all(token in name_tokens for token in phrase_tokens):
+                score -= 4
             elif phrase_lower in lowered:
                 score += 6
         for term in terms:
-            token = term.lower()
+            token = _normalize_token(term)
             if token == lowered:
                 score += 6
             elif _normalize_token(token) == normalized_name:
                 score += 5
-            elif token in lowered:
+            elif token in name_tokens:
+                score += 4
+            elif token and len(token) >= 5 and token in lowered:
                 score += 3
-        score += len(name.split())
+        score += _entity_name_quality(name)
         scored.append((score, name))
 
     ranked = sorted(scored, key=lambda item: (item[0], -len(item[1])), reverse=True)
@@ -640,14 +697,25 @@ def _score_neighborhood_row(row: dict, anchor: str, terms: list[str], relation_h
     subject_lower = subject.lower()
     object_lower = object_.lower()
     relation_text = _relation_to_text(relation).lower()
+    subject_tokens = set(_tokenize_value(subject))
+    object_tokens = set(_tokenize_value(object_))
+    relation_tokens = set(_tokenize_value(relation_text))
     for term in terms:
-        token = term.lower()
-        if token in subject_lower:
+        token = _normalize_token(term)
+        if token in subject_tokens:
             score += 2
-        if token in object_lower:
+        elif token and len(token) >= 5 and token in subject_lower:
+            score += 1
+        if token in object_tokens:
             score += 2
-        if token in relation_text:
+        elif token and len(token) >= 5 and token in object_lower:
+            score += 1
+        if token in relation_tokens:
             score += 2
+        elif token and len(token) >= 5 and token in relation_text:
+            score += 1
+    score += _entity_name_quality(subject)
+    score += _entity_name_quality(object_)
     return score
 
 
@@ -656,6 +724,8 @@ def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], te
     seen = set()
     lowered_anchor = anchor.lower()
     grouped_objects: dict[str, list[str]] = {}
+    incoming_relations: dict[str, list[str]] = {}
+    incoming_facts: list[str] = []
 
     ranked_rows = sorted(
         rows,
@@ -675,10 +745,18 @@ def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], te
             grouped_objects.setdefault(relation_upper, [])
             if object_ not in grouped_objects[relation_upper]:
                 grouped_objects[relation_upper].append(object_)
+        elif object_.lower() == lowered_anchor:
+            incoming_relations.setdefault(relation_upper, [])
+            if subject not in incoming_relations[relation_upper]:
+                incoming_relations[relation_upper].append(subject)
+            line = _sentence_from_inverse_relation(anchor, subject, relation).rstrip(".")
+            if line and line.lower() not in seen:
+                seen.add(line.lower())
+                incoming_facts.append(line)
 
     lower_question = question.strip().lower()
     if relation_groups:
-        available_relations = set(grouped_objects.keys())
+        available_relations = set(grouped_objects.keys()) | set(incoming_relations.keys())
         if not all(group & available_relations for group in relation_groups):
             return ""
 
@@ -709,11 +787,6 @@ def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], te
                     return f"{anchor} is located in {grouped_objects[relation_key][0]}."
         if relation_hints & {"PRACTICES"} and "PRACTICES" in grouped_objects:
             return f"{anchor} practices {_join_values(grouped_objects['PRACTICES'])}."
-        if relation_hints & {"ADOPTED", "ADOPTED_ON"}:
-            if "ADOPTED_ON" in grouped_objects and grouped_objects["ADOPTED_ON"]:
-                return f"{anchor} was adopted on {_join_values(grouped_objects['ADOPTED_ON'])}."
-            if "ADOPTED" in grouped_objects and grouped_objects["ADOPTED"]:
-                return f"{anchor} adopted {_join_values(grouped_objects['ADOPTED'])}."
         if relation_hints & {"WEARS"} and "WEARS" in grouped_objects:
             return f"{anchor} wears {_join_values(grouped_objects['WEARS'])}."
         if relation_hints & {"FOUNDED", "FOUNDED_BY"}:
@@ -721,6 +794,12 @@ def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], te
                 return f"{anchor} founded {_join_values(grouped_objects['FOUNDED'])}."
             if "FOUNDED_BY" in grouped_objects:
                 return f"{anchor} was founded by {_join_values(grouped_objects['FOUNDED_BY'])}."
+        for relation_upper in sorted(relation_hints):
+            if relation_upper in incoming_relations:
+                return "; ".join(
+                    _sentence_from_inverse_relation(anchor, subject, relation_upper).rstrip(".")
+                    for subject in incoming_relations[relation_upper]
+                ) + "."
         return ""
 
     if lower_question.startswith("what does") and "INCLUDES" in grouped_objects:
@@ -748,6 +827,7 @@ def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], te
                 if value not in grouped_by_verb[verb]:
                     grouped_by_verb[verb].append(value)
         summary_lines = [f"{anchor} {verb} {_join_values(values)}" for verb, values in grouped_by_verb.items() if values]
+        summary_lines.extend(line for line in incoming_facts if line not in summary_lines)
         if summary_lines:
             if len(summary_lines) == 1:
                 return summary_lines[0] + "."

@@ -4,7 +4,9 @@ from fastapi.testclient import TestClient
 
 import app
 import document_store
+import extractor
 import query_engine
+import utils
 
 
 class FakeGraph:
@@ -47,20 +49,31 @@ class FakeGraph:
 
     def search_paths(self, terms, document_id, max_hops=2, limit=20):
         triples = FakeGraph.stored.get(document_id, [])
-        if len(triples) >= 2:
-            return "MATCH p=(a)-[r*1..2]-(b)", [
-                {
-                    "path_nodes": [
-                        triples[0]["subject"],
-                        triples[0]["object"],
-                        triples[1]["object"],
-                    ],
-                    "path_relationships": [
-                        triples[0]["relation"],
-                        triples[1]["relation"],
-                    ],
-                }
-            ]
+        paths = []
+        for first in triples:
+            if terms and not any(
+                term.lower() in first["subject"].lower() or term.lower() in first["object"].lower()
+                for term in terms
+            ):
+                continue
+            for second in triples:
+                if first["object"].lower() != second["subject"].lower():
+                    continue
+                paths.append(
+                    {
+                        "path_nodes": [
+                            first["subject"],
+                            first["object"],
+                            second["object"],
+                        ],
+                        "path_relationships": [
+                            first["relation"],
+                            second["relation"],
+                        ],
+                    }
+                )
+        if paths:
+            return "MATCH p=(a)-[r*1..2]-(b)", paths[:limit]
         return "MATCH p=(a)-[r*1..2]-(b)", []
 
     def search_semantic(self, terms, document_id, limit=40):
@@ -446,8 +459,11 @@ class AppSmokeTests(unittest.TestCase):
             "It is not in the uploaded document. Please check the text.",
         )
 
-    def test_adopted_query_uses_adopted_on_relation(self):
-        app.extract_text_from_pdf = lambda _: "The Constituent Assembly drafted the Indian Constitution. The Indian Constitution was adopted on 26 November 1949."
+    def test_adopted_query_uses_path_when_relation_is_on_neighbor_node(self):
+        app.extract_text_from_pdf = lambda _: (
+            "The Constituent Assembly drafted the Indian Constitution. "
+            "The Indian Constitution was adopted on 26 November 1949."
+        )
         app.extract_triples_groq = lambda chunk: [
             {"subject": "Constituent Assembly", "relation": "DRAFTED", "object": "Indian Constitution"},
             {"subject": "Constituent Assembly", "relation": "CONVENED_IN", "object": "December 1946"},
@@ -456,10 +472,171 @@ class AppSmokeTests(unittest.TestCase):
         self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
         ask = self.client.post("/ask", json={"question": "Constituent Assembly adopted on"})
         self.assertEqual(ask.status_code, 200)
-        self.assertEqual(
-            ask.json()["answer"],
-            "Indian Constitution was adopted on 26 November 1949.",
+        self.assertIn("Indian Constitution was adopted on 26 November 1949", ask.json()["answer"])
+
+    def test_chunking_preserves_sentence_boundaries(self):
+        text = (
+            "The Indian Constitution was drafted by the Constituent Assembly. "
+            "These are the legislature, the executive and the judiciary. "
+            "The judiciary refers to the system of courts."
         )
+        chunks = utils.chunk_text(
+            text,
+            target_words=8,
+            min_words=5,
+            max_words=12,
+            overlap_words=4,
+        )
+        self.assertTrue(chunks)
+        self.assertTrue(all(chunk.strip().endswith((".", "!", "?")) for chunk in chunks))
+        self.assertTrue(any("These are the legislature" in chunk for chunk in chunks))
+
+    def test_context_extraction_links_followup_list_sentence(self):
+        triples = extractor._extract_interlinked_context_triples(
+            "According to the Constitution, there are three organs of government. "
+            "These are the legislature, the executive and the judiciary."
+        )
+        cleaned = extractor.clean_and_validate_triples(triples)
+        self.assertIn(
+            {
+                "subject": "three organs of government",
+                "relation": "INCLUDES",
+                "object": "legislature",
+            },
+            cleaned,
+        )
+        self.assertIn(
+            {
+                "subject": "three organs of government",
+                "relation": "INCLUDES",
+                "object": "executive",
+            },
+            cleaned,
+        )
+        self.assertIn(
+            {
+                "subject": "three organs of government",
+                "relation": "INCLUDES",
+                "object": "judiciary",
+            },
+            cleaned,
+        )
+
+    def test_context_extraction_keeps_adjective_qualified_entity_and_pronoun_followup(self):
+        triples = extractor._extract_interlinked_context_triples(
+            "A good Constitution does not allow these whims to change its basic structure. "
+            "It does not allow for the easy overthrow of provisions that guarantee rights of citizens."
+        )
+        cleaned = extractor.clean_and_validate_triples(triples)
+        self.assertIn(
+            {
+                "subject": "good Constitution",
+                "relation": "DOES_NOT_ALLOW",
+                "object": "whims to change its basic structure",
+            },
+            cleaned,
+        )
+        self.assertIn(
+            {
+                "subject": "good Constitution",
+                "relation": "DOES_NOT_ALLOW",
+                "object": "easy overthrow of provisions that guarantee rights of citizens",
+            },
+            cleaned,
+        )
+
+    def test_entity_only_answer_includes_incoming_and_outgoing_facts(self):
+        app.extract_text_from_pdf = lambda _: "Indian Constitution includes Fundamental Rights. Constituent Assembly drafted Indian Constitution."
+        app.extract_triples_groq = lambda chunk: [
+            {"subject": "Indian Constitution", "relation": "INCLUDES", "object": "Fundamental Rights"},
+            {"subject": "Constituent Assembly", "relation": "DRAFTED", "object": "Indian Constitution"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "Indian Constitution"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertIn("Indian Constitution includes Fundamental Rights", ask.json()["answer"])
+        self.assertIn("Constituent Assembly drafted Indian Constitution", ask.json()["answer"])
+
+    def test_adjective_qualified_entity_question_prefers_specific_node(self):
+        app.extract_text_from_pdf = lambda _: "A good Constitution protects basic structure."
+        app.extract_triples_groq = lambda chunk: [
+            {"subject": "Constitution", "relation": "INCLUDES", "object": "Lists"},
+            {"subject": "Good Constitution", "relation": "DOES_NOT_ALLOW", "object": "Easy Overthrow of Provisions"},
+            {"subject": "Good Constitution", "relation": "PROTECTS", "object": "Rights of Citizens"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "what is a good constitution"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertIn("Good Constitution does not allow Easy Overthrow of Provisions", ask.json()["answer"])
+        self.assertIn("Good Constitution protects Rights of Citizens", ask.json()["answer"])
+        self.assertNotIn("Constitution includes Lists", ask.json()["answer"])
+
+    def test_anchor_ranking_prefers_base_entity_when_modifier_is_not_requested(self):
+        ranked = query_engine._rank_anchor_entities(
+            terms=["forest"],
+            phrases=[],
+            candidates=[
+                {"entity_name": "Green Forest"},
+                {"entity_name": "Forest"},
+            ],
+        )
+        self.assertEqual(ranked[0], "Forest")
+
+    def test_anchor_ranking_prefers_qualified_entity_when_modifier_is_requested(self):
+        ranked = query_engine._rank_anchor_entities(
+            terms=["green", "forest"],
+            phrases=["green forest"],
+            candidates=[
+                {"entity_name": "Forest"},
+                {"entity_name": "Green Forest"},
+            ],
+        )
+        self.assertEqual(ranked[0], "Green Forest")
+
+    def test_what_is_constitution_prefers_clean_anchor_over_long_noisy_node(self):
+        app.extract_text_from_pdf = lambda _: "The Constitution contains fundamental rights."
+        app.extract_triples_groq = lambda chunk: [
+            {
+                "subject": "various minority communities also expressed the need for the Constitution to",
+                "relation": "INCLUDES",
+                "object": "rights that would protect their groups",
+            },
+            {
+                "subject": "Indian Constitution",
+                "relation": "INCLUDES",
+                "object": "Fundamental Rights",
+            },
+            {
+                "subject": "Constituent Assembly",
+                "relation": "DRAFTED",
+                "object": "Indian Constitution",
+            },
+        ]
+        self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "what is constitution"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertIn("Indian Constitution includes Fundamental Rights", ask.json()["answer"])
+        self.assertNotIn("various minority communities", ask.json()["answer"].lower())
+
+    def test_who_is_father_of_constitution_returns_ambedkar_fact(self):
+        app.extract_text_from_pdf = lambda _: "Baba Saheb Dr Ambedkar is known as Father of the Indian Constitution."
+        app.extract_triples_groq = lambda chunk: [
+            {
+                "subject": "Baba Saheb Dr Ambedkar",
+                "relation": "KNOWN_AS",
+                "object": "Father of the Indian Constitution",
+            },
+            {
+                "subject": "Indian Constitution",
+                "relation": "INCLUDES",
+                "object": "Fundamental Rights",
+            },
+        ]
+        self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "who is the father of constitution"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertIn("Baba Saheb Dr Ambedkar", ask.json()["answer"])
+        self.assertIn("Father of the Indian Constitution", ask.json()["answer"])
 
 
 if __name__ == "__main__":

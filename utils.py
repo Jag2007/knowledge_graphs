@@ -18,51 +18,52 @@ def chunk_text(
     max_words: int = 220,
     overlap_words: int = 40,
 ) -> list[str]:
-    """Split text into overlapping sentence-aware chunks for better extraction quality."""
+    """Split text into sentence-aware overlapping chunks so context is preserved better."""
     sentences = split_into_sentences(text)
     if not sentences:
         return []
 
     chunks: list[str] = []
     current_sentences: list[str] = []
-    current_word_count = 0
-
-    def flush_chunk() -> None:
-        nonlocal current_sentences, current_word_count
-        chunk = " ".join(current_sentences).strip()
-        if chunk:
-            chunks.append(chunk)
-
-        overlap_buffer: list[str] = []
-        overlap_count = 0
-        for previous_sentence in reversed(current_sentences):
-            previous_count = len(previous_sentence.split())
-            if overlap_buffer and overlap_count + previous_count > overlap_words:
-                break
-            overlap_buffer.insert(0, previous_sentence)
-            overlap_count += previous_count
-
-        current_sentences = overlap_buffer
-        current_word_count = overlap_count
+    current_words = 0
 
     for sentence in sentences:
-        sentence_word_count = len(sentence.split())
-        if sentence_word_count == 0:
-            continue
+        sentence_words = len(sentence.split())
+        if current_sentences and current_words + sentence_words > max_words:
+            chunks.append(" ".join(current_sentences).strip())
 
-        if current_sentences and current_word_count + sentence_word_count > max_words:
-            flush_chunk()
+            overlap_sentences: list[str] = []
+            overlap_count = 0
+            for previous in reversed(current_sentences):
+                previous_words = len(previous.split())
+                if overlap_sentences and overlap_count + previous_words > overlap_words:
+                    break
+                overlap_sentences.insert(0, previous)
+                overlap_count += previous_words
+
+            current_sentences = list(overlap_sentences)
+            current_words = overlap_count
 
         current_sentences.append(sentence)
-        current_word_count += sentence_word_count
+        current_words += sentence_words
 
-        if current_word_count >= target_words:
-            flush_chunk()
+        if current_words >= target_words:
+            chunks.append(" ".join(current_sentences).strip())
+
+            overlap_sentences = []
+            overlap_count = 0
+            for previous in reversed(current_sentences):
+                previous_words = len(previous.split())
+                if overlap_sentences and overlap_count + previous_words > overlap_words:
+                    break
+                overlap_sentences.insert(0, previous)
+                overlap_count += previous_words
+
+            current_sentences = list(overlap_sentences)
+            current_words = overlap_count
 
     if current_sentences:
-        chunk = " ".join(current_sentences).strip()
-        if chunk:
-            chunks.append(chunk)
+        chunks.append(" ".join(current_sentences).strip())
 
     if len(chunks) >= 2:
         last_words = len(chunks[-1].split())
@@ -75,18 +76,18 @@ def chunk_text(
     deduped_chunks: list[str] = []
     seen = set()
     for chunk in chunks:
-        normalized = re.sub(r"\s+", " ", chunk).strip()
+        normalized = re.sub(r"\s+", " ", chunk).strip().lower()
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
-        deduped_chunks.append(normalized)
+        deduped_chunks.append(chunk.strip())
 
     return deduped_chunks
 
 def split_into_sentences(text: str) -> list[str]:
     """Split text into a list of sentences cleanly. (Legacy)"""
-    # Simple sentence splitting
-    sentences = re.split(r'(?<=[.!?]) +', text.replace('\n', ' '))
+    normalized_text = re.sub(r"\s+", " ", text.replace("\n", " ")).strip()
+    sentences = re.split(r'(?<=[.!?])\s+', normalized_text)
     # Clean and filter out very short results
     return [s.strip() for s in sentences if len(s.strip()) > 5]
 
