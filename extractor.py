@@ -8,7 +8,7 @@ import time
 from groq import Groq
 from dotenv import load_dotenv
 
-from utils import extract_first_json, normalise_relation_for_llm
+from utils import extract_first_json, normalise_relation_for_llm, recover_json_objects
 
 load_dotenv()
 
@@ -19,7 +19,6 @@ NOISY_RELATIONS = {
     "ARE_COMMON",
     "OLDEST",
     "MOST_DIVERSE",
-    "REFLECTS",
     "VARY_BY",
     "VARY_WIDELY",
     "SPREADS",
@@ -59,6 +58,7 @@ INVALID_SUBJECTS = {
 _EXTRACTION_CACHE: dict[str, list[dict]] = {}
 _REQUEST_LOCK = threading.Lock()
 _LAST_REQUEST_AT = 0.0
+DEBUG_LLM_OUTPUT = os.environ.get("KG_DEBUG_LLM_OUTPUT", "0").strip().lower() in {"1", "true", "yes"}
 
 
 def _get_client() -> Groq:
@@ -107,7 +107,10 @@ def _call_groq_with_retry(client: Groq, *, model: str, prompt: str):
                 _LAST_REQUEST_AT = time.monotonic()
                 last_error = error
                 delay = _extract_retry_delay(error)
-                print(f"Groq request failed (attempt {attempt + 1}/{max_retries}): {error}")
+                print(
+                    f"Groq request failed (attempt {attempt + 1}/{max_retries}). "
+                    f"Waiting {delay:.1f}s before retrying."
+                )
 
         if attempt < max_retries - 1:
             time.sleep(delay)
@@ -198,7 +201,8 @@ def extract_triples_groq(chunk: str) -> list:
         completion = _call_groq_with_retry(client, model=model, prompt=prompt)
 
         response = completion.choices[0].message.content or ""
-        print("RAW LLM OUTPUT:", response[:500])
+        if DEBUG_LLM_OUTPUT:
+            print("RAW LLM OUTPUT:", response[:500])
 
         # Fallback trigger: empty response.
         if not response.strip():
@@ -208,8 +212,10 @@ def extract_triples_groq(chunk: str) -> list:
             json_blob = extract_first_json(response)
             triples = json.loads(json_blob)
         except Exception:
-            # If parsing fails -> skip this chunk (do not crash).
-            return [], "parse_failed"
+            triples = recover_json_objects(response)
+            if not triples:
+                # If parsing still fails -> skip this chunk without crashing the full upload.
+                return [], "parse_failed"
 
         cleaned = clean_and_validate_triples(triples)
         if not cleaned:
@@ -234,9 +240,11 @@ Rules:
 - Keep subject and object short and clean.
 - Relation must be 1-3 words.
 - Use UPPERCASE_WITH_UNDERSCORES.
-- Prefer useful factual relations such as LOCATED_IN, WEARS, CELEBRATES, SPEAKS, INCLUDES, PRACTICES, USES, PLAYS, PERFORMS.
-- Skip vague or descriptive relations like OLDEST, MOST_DIVERSE, IMPORTANT, KNOWN_FOR.
+- Prefer useful factual relations such as LOCATED_IN, WEARS, CELEBRATES, SPEAKS, INCLUDES, PRACTICES, USES, REFLECTS, GUARANTEES, PROTECTS, DRAFTED, MEMBER_OF.
+- Avoid vague predicate wording like PLAYS, HAS, IS, ARE, IMPORTANT_ROLE, or very long relation names.
+- Skip weak descriptive relations like OLDEST, MOST_DIVERSE, IMPORTANT, KNOWN_FOR.
 - Skip incomplete objects or trailing phrases.
+- Preserve meaningful document facts, but do not invent relations that are not present in the text.
 - Do not explain anything.
 - If there are no clear factual triples, return [].
 

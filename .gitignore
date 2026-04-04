@@ -23,6 +23,9 @@ venv/
 .active_document.json
 .triple_cache.json
 
+# Root-level PDFs used only for local upload tests
+/*.pdf
+
 # Logs / local databases / temp files
 *.log
 *.sqlite3

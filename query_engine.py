@@ -5,6 +5,7 @@ from graph import Neo4jGraph
 STOP_WORDS = {
     "a",
     "an",
+    "about",
     "and",
     "are",
     "as",
@@ -19,6 +20,7 @@ STOP_WORDS = {
     "in",
     "is",
     "it",
+    "know",
     "me",
     "of",
     "on",
@@ -318,7 +320,9 @@ def _is_overview_question(question: str) -> bool:
     text = question.strip().lower()
     patterns = [
         "what does this pdf talk about",
+        "what is this pdf talking about",
         "what does this document talk about",
+        "what is this document talking about",
         "what is this pdf about",
         "what is this document about",
         "give me a summary",

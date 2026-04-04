@@ -1,3 +1,4 @@
+import json
 import fitz  # PyMuPDF
 import re
 
@@ -88,6 +89,28 @@ def extract_first_json(text: str) -> str:
     if start == -1 or end == -1 or end <= start:
         raise ValueError("Could not locate JSON in LLM response")
     return s[start : end + 1]
+
+
+def recover_json_objects(text: str) -> list[dict]:
+    """
+    Recover complete JSON objects from a possibly truncated JSON array.
+    This is a safety net for LLM responses that stop mid-array.
+    """
+    if not text:
+        return []
+
+    s = strip_code_fences(text)
+    objects: list[dict] = []
+
+    for match in re.finditer(r"\{[^{}]*\}", s, flags=re.DOTALL):
+        try:
+            item = json.loads(match.group(0))
+        except Exception:
+            continue
+        if isinstance(item, dict):
+            objects.append(item)
+
+    return objects
 
 
 def normalise_relation_for_llm(relation: str) -> str:

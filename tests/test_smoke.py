@@ -212,6 +212,18 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(ask.status_code, 200)
         self.assertIn("The uploaded document mainly discusses", ask.json()["answer"])
 
+    def test_overview_question_accepts_talking_about_variant(self):
+        app.extract_text_from_pdf = lambda _: "The Indian Constitution discusses fundamental rights and duties."
+        app.extract_triples_groq = lambda chunk: [
+            {"subject": "Indian Constitution", "relation": "INCLUDES", "object": "Fundamental Rights"},
+            {"subject": "Indian Constitution", "relation": "INCLUDES", "object": "Fundamental Duties"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "what is this pdf talking about"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertIn("The uploaded document mainly discusses", ask.json()["answer"])
+        self.assertIn("Indian Constitution", ask.json()["answer"])
+
     def test_semantic_retrieval_matches_relation_text(self):
         app.extract_text_from_pdf = lambda _: "Indian culture includes festivals."
         app.extract_triples_groq = lambda chunk: [
@@ -415,6 +427,23 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(
             ask.json()["answer"],
             "Vegetables are included in Indian Cuisine.",
+        )
+
+    def test_unrelated_question_does_not_return_false_positive(self):
+        app.extract_text_from_pdf = lambda _: "Baba Saheb Dr Ambedkar is known as Father of the Indian Constitution."
+        app.extract_triples_groq = lambda chunk: [
+            {
+                "subject": "Baba Saheb Dr Ambedkar",
+                "relation": "KNOWN_AS",
+                "object": "Father of the Indian Constitution",
+            },
+        ]
+        self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "what do you know about second world war"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertEqual(
+            ask.json()["answer"],
+            "It is not in the uploaded document. Please check the text.",
         )
 
 
