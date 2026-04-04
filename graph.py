@@ -147,7 +147,22 @@ class Neo4jGraph:
 
         with self.driver.session() as session:
             rows = session.run(cypher, document_id=document_id, terms=cleaned_terms[:20], limit=limit)
-            return cypher, [row.data() for row in rows]
+            matches = [row.data() for row in rows]
+            if matches:
+                return cypher, matches
+
+            fallback_cypher = """
+            MATCH (d:Document {document_id: $document_id})-[:MENTIONS]->(e:Entity)
+            RETURN DISTINCT e.name AS entity_name
+            ORDER BY size(e.name) ASC, e.name ASC
+            LIMIT $limit
+            """.strip()
+            fallback_rows = session.run(
+                fallback_cypher,
+                document_id=document_id,
+                limit=max(limit * 10, 100),
+            )
+            return fallback_cypher, [row.data() for row in fallback_rows]
 
     def get_entity_neighborhood(self, entity_name: str, document_id: str, limit: int = 20) -> tuple[str, list[dict]]:
         cypher = """

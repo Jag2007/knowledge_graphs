@@ -117,6 +117,14 @@ class FakeGraph:
                 if any(term.lower() in lowered for term in terms):
                     seen.add(lowered)
                     candidates.append({"entity_name": value})
+        if not candidates:
+            for triple in FakeGraph.stored.get(document_id, []):
+                for value in (triple["subject"], triple["object"]):
+                    lowered = value.lower()
+                    if lowered in seen:
+                        continue
+                    seen.add(lowered)
+                    candidates.append({"entity_name": value})
         return "MATCH (d)-[:MENTIONS]->(e)", candidates[:limit]
 
     def get_entity_neighborhood(self, entity_name, document_id, limit=20):
@@ -379,6 +387,34 @@ class AppSmokeTests(unittest.TestCase):
             "Indian Culture celebrates Family and Respect.",
         )
 
+    def test_relation_specific_question_uses_requested_relation_family_generically(self):
+        app.extract_text_from_pdf = lambda _: "The Indian Constitution guarantees justice, equality, and liberty."
+        app.extract_triples_groq = lambda chunk: [
+            {"subject": "Indian Constitution", "relation": "GUARANTEES", "object": "Justice"},
+            {"subject": "Indian Constitution", "relation": "GUARANTEES", "object": "Equality"},
+            {"subject": "Indian Constitution", "relation": "GUARANTEES", "object": "Liberty"},
+            {"subject": "Indian Constitution", "relation": "INCLUDES", "object": "Constituent Assembly"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "what does Indian Constitution guarantees"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertEqual(
+            ask.json()["answer"],
+            "Indian Constitution guarantees Justice, Equality, and Liberty.",
+        )
+
+    def test_relation_question_prefers_edges_covering_multiple_query_terms(self):
+        app.extract_text_from_pdf = lambda _: "India was partitioned from Pakistan. India practices federalism."
+        app.extract_triples_groq = lambda chunk: [
+            {"subject": "India", "relation": "PARTITIONED_FROM", "object": "Pakistan"},
+            {"subject": "India", "relation": "PRACTICES", "object": "Federalism"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("partition.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "what do you know about india and pakistan separation"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertIn("India partitioned from Pakistan", ask.json()["answer"])
+        self.assertNotIn("federalism", ask.json()["answer"].lower())
+
     def test_direct_formatter_aggregates_all_relation_values(self):
         results = [
             {"from_name": "Indian Culture", "relation_type": "CELEBRATES", "to_name": "Family"},
@@ -545,6 +581,24 @@ class AppSmokeTests(unittest.TestCase):
             cleaned,
         )
 
+    def test_clean_and_validate_triples_drops_placeholder_objects(self):
+        cleaned = extractor.clean_and_validate_triples(
+            [
+                {"subject": "Indian Constitution", "relation": "CONVENED_IN", "object": "Not Specified"},
+                {"subject": "Indian Constitution", "relation": "INCLUDES", "object": "Fundamental Rights"},
+            ]
+        )
+        self.assertEqual(
+            cleaned,
+            [
+                {
+                    "subject": "Indian Constitution",
+                    "relation": "INCLUDES",
+                    "object": "Fundamental Rights",
+                }
+            ],
+        )
+
     def test_entity_only_answer_includes_incoming_and_outgoing_facts(self):
         app.extract_text_from_pdf = lambda _: "Indian Constitution includes Fundamental Rights. Constituent Assembly drafted Indian Constitution."
         app.extract_triples_groq = lambda chunk: [
@@ -637,6 +691,40 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(ask.status_code, 200)
         self.assertIn("Baba Saheb Dr Ambedkar", ask.json()["answer"])
         self.assertIn("Father of the Indian Constitution", ask.json()["answer"])
+
+    def test_when_question_uses_temporal_relation_and_fuzzy_entity_match(self):
+        app.extract_text_from_pdf = lambda _: "The Indian National Movement began in 1885. Indian National Congress made demand for Constituent Assembly."
+        app.extract_triples_groq = lambda chunk: [
+            {"subject": "Indian National Movement", "relation": "BEGAN_IN", "object": "1885"},
+            {"subject": "Indian National Congress", "relation": "MADE_DEMAND", "object": "Constituent Assembly"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("movement.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "when did indian national moment start"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertEqual(ask.json()["answer"], "Indian National Movement began in 1885.")
+
+    def test_plain_topic_phrase_with_relation_like_noun_is_treated_as_entity_lookup(self):
+        app.extract_text_from_pdf = lambda _: "The Indian Constitution features Separation of Powers. Separation Between Religion defines Secularism."
+        app.extract_triples_groq = lambda chunk: [
+            {"subject": "Indian Constitution", "relation": "FEATURES", "object": "Separation of Powers"},
+            {"subject": "Separation Between Religion", "relation": "DEFINES", "object": "Secularism"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "Separation of Powers"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertEqual(ask.json()["answer"], "Indian Constitution features Separation of Powers.")
+
+    def test_sentence_formatter_renders_unknown_relations_in_readable_lowercase(self):
+        self.assertEqual(
+            query_engine._sentence_from_relation(
+                "Indian Constitution",
+                "FEATURES",
+                "Separation of Powers",
+                "",
+                [],
+            ),
+            "Indian Constitution features Separation of Powers.",
+        )
 
 
 if __name__ == "__main__":

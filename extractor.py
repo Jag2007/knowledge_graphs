@@ -39,6 +39,11 @@ INVALID_OBJECTS = {
     "person",
     "culture",
     "society",
+    "not specified",
+    "not_specified",
+    "unknown",
+    "none",
+    "null",
 }
 
 INVALID_SUBJECTS = {

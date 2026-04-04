@@ -1,4 +1,5 @@
 import re
+from difflib import SequenceMatcher
 
 from graph import Neo4jGraph
 
@@ -14,6 +15,7 @@ STOP_WORDS = {
     "by",
     "do",
     "does",
+    "did",
     "for",
     "from",
     "how",
@@ -76,6 +78,24 @@ RELATION_HINTS = {
     "known": {"KNOWN_AS"},
     "allow": {"DOES_NOT_ALLOW"},
     "allows": {"DOES_NOT_ALLOW"},
+    "guarantee": {"GUARANTEES"},
+    "guarantees": {"GUARANTEES"},
+    "protect": {"PROTECTS"},
+    "protects": {"PROTECTS"},
+    "prohibit": {"PROHIBITS"},
+    "prohibits": {"PROHIBITS"},
+    "specify": {"SPECIFIES"},
+    "specifies": {"SPECIFIES"},
+    "mention": {"MENTIONS"},
+    "mentions": {"MENTIONS"},
+    "start": {"STARTED", "STARTED_IN", "STARTED_ON", "BEGAN", "BEGAN_IN", "BEGAN_ON", "FOUNDED", "CONVENED_IN"},
+    "started": {"STARTED", "STARTED_IN", "STARTED_ON", "BEGAN", "BEGAN_IN", "BEGAN_ON", "FOUNDED", "CONVENED_IN"},
+    "begin": {"STARTED", "STARTED_IN", "STARTED_ON", "BEGAN", "BEGAN_IN", "BEGAN_ON", "FOUNDED", "CONVENED_IN"},
+    "began": {"STARTED", "STARTED_IN", "STARTED_ON", "BEGAN", "BEGAN_IN", "BEGAN_ON", "FOUNDED", "CONVENED_IN"},
+    "separation": {"SEPARATED_FROM", "SEPARATED_INTO", "PARTITIONED", "PARTITIONED_FROM", "DIVIDED_INTO"},
+    "partition": {"SEPARATED_FROM", "SEPARATED_INTO", "PARTITIONED", "PARTITIONED_FROM", "DIVIDED_INTO"},
+    "separate": {"SEPARATED_FROM", "SEPARATED_INTO", "PARTITIONED", "PARTITIONED_FROM", "DIVIDED_INTO"},
+    "divided": {"SEPARATED_FROM", "SEPARATED_INTO", "PARTITIONED", "PARTITIONED_FROM", "DIVIDED_INTO"},
 }
 
 SUMMARY_RELATION_ORDER = [
@@ -110,11 +130,22 @@ def _verb_from_relation(relation: str) -> str:
         "FOUNDED_BY": "was founded by",
         "DRAFTED": "drafted",
         "CONVENED_IN": "convened in",
+        "STARTED": "started",
+        "STARTED_IN": "started in",
+        "STARTED_ON": "started on",
+        "BEGAN": "began",
+        "BEGAN_IN": "began in",
+        "BEGAN_ON": "began on",
         "CHAIRMAN_OF": "is the chairman of",
         "CEO_OF": "is the CEO of",
         "REFLECTS": "reflects",
         "KNOWN_AS": "is known as",
         "DOES_NOT_ALLOW": "does not allow",
+        "GUARANTEES": "guarantees",
+        "PROTECTS": "protects",
+        "PROHIBITS": "prohibits",
+        "SPECIFIES": "specifies",
+        "MENTIONS": "mentions",
         "REPRESENTS": "represents",
         "KNOWN_FOR": "is known for",
     }
@@ -159,6 +190,36 @@ def _tokenize_value(value: str) -> list[str]:
         for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", str(value or "").lower())
         if token and _normalize_token(token)
     ]
+
+
+def _tokens_match(query_token: str, candidate_token: str) -> bool:
+    query_norm = _normalize_token(query_token)
+    candidate_norm = _normalize_token(candidate_token)
+    if not query_norm or not candidate_norm:
+        return False
+    if query_norm == candidate_norm:
+        return True
+    if len(query_norm) >= 5 and len(candidate_norm) >= 5:
+        if query_norm in candidate_norm or candidate_norm in query_norm:
+            return True
+        return SequenceMatcher(None, query_norm, candidate_norm).ratio() >= 0.84
+    return False
+
+
+def _count_term_coverage(text: str, terms: list[str]) -> int:
+    tokens = set(_tokenize_value(text))
+    covered = 0
+    for term in terms:
+        if any(_tokens_match(term, token) for token in tokens):
+            covered += 1
+    return covered
+
+
+def _required_term_coverage(terms: list[str]) -> int:
+    meaningful_terms = [term for term in terms if _normalize_token(term) and _normalize_token(term) not in STOP_WORDS]
+    if len(meaningful_terms) <= 2:
+        return 1 if meaningful_terms else 0
+    return 2
 
 
 def _entity_name_quality(name: str) -> int:
@@ -223,7 +284,8 @@ def _sentence_from_relation(subject: str, relation: str, object_: str, question:
     if question.strip().lower().startswith("where"):
         return f"{subject} is {relation} {object_}."
 
-    return f"{subject} {relation} {object_}."
+    verb = _adjust_verb_for_subject(subject, _verb_from_relation(relation_upper))
+    return f"{subject} {verb} {object_}."
 
 
 def _sentence_from_inverse_relation(anchor: str, subject: str, relation: str) -> str:
@@ -394,6 +456,21 @@ def _is_plain_entity_query(question: str) -> bool:
     return bool(tokens) and len(tokens) <= 4 and "?" not in question
 
 
+def _is_explicit_relation_question(question: str, relation_hints: set[str]) -> bool:
+    """Avoid treating nouns inside topic phrases as relation requests."""
+    if not relation_hints:
+        return False
+
+    text = question.strip().lower()
+    if text.startswith(("what does ", "what did ", "when ", "where ", "who ", "which ")):
+        return True
+    if _is_node_overview_question(question):
+        return False
+    if _is_plain_entity_query(question) and not text.startswith(("what is the ", "what are the ", "where ", "when ", "who ")):
+        return False
+    return True
+
+
 def _is_multi_hop_question(question: str, relation_groups: list[set[str]]) -> bool:
     """Detect questions that likely need a path chain instead of one local edge."""
     text = question.strip().lower()
@@ -423,15 +500,15 @@ def _score_direct_row(row: dict, terms: list[str]) -> int:
 
     for term in terms:
         token = _normalize_token(term)
-        if token in subject_tokens:
+        if any(_tokens_match(token, item) for item in subject_tokens):
             score += 3
         elif token and token in subject:
             score += 1
-        if token in object_tokens:
+        if any(_tokens_match(token, item) for item in object_tokens):
             score += 3
         elif token and token in object_:
             score += 1
-        if token in relation_tokens:
+        if any(_tokens_match(token, item) for item in relation_tokens):
             score += 2
         elif token and token in relation:
             score += 1
@@ -464,6 +541,17 @@ def _format_direct_results(question: str, results: list[dict], terms: list[str],
 
     if not cleaned_rows:
         return ""
+
+    minimum_coverage = _required_term_coverage(terms)
+    if minimum_coverage >= 2:
+        covered_rows = [
+            row for row in cleaned_rows
+            if _count_term_coverage(f"{row['subject']} {row['relation']} {row['object']}", terms) >= minimum_coverage
+        ]
+        if covered_rows:
+            cleaned_rows = covered_rows
+        elif relation_hints:
+            return ""
 
     if relation_hints:
         grouped: dict[tuple[str, str], list[str]] = {}
@@ -644,32 +732,48 @@ def _rank_anchor_entities(terms: list[str], phrases: list[str], candidates: list
         normalized_name = _normalize_token(name)
         name_tokens = set(_tokenize_value(name))
         score = 0
+        has_match = False
         for phrase in phrases:
             phrase_lower = phrase.lower()
             normalized_phrase = _normalize_token(phrase)
             phrase_tokens = [token for token in _tokenize_value(phrase) if token not in STOP_WORDS]
             if phrase_lower == lowered:
                 score += 16
+                has_match = True
             elif normalized_phrase == normalized_name:
                 score += 14
+                has_match = True
             elif phrase_tokens and all(token in name_tokens for token in phrase_tokens):
                 score += 12 + len(phrase_tokens)
+                has_match = True
+            elif phrase_tokens and all(
+                any(_tokens_match(token, name_token) for name_token in name_tokens)
+                for token in phrase_tokens
+            ):
+                score += 10 + len(phrase_tokens)
+                has_match = True
             elif phrase_tokens and len(phrase_tokens) > 1 and not all(token in name_tokens for token in phrase_tokens):
                 score -= 4
             elif phrase_lower in lowered:
                 score += 6
+                has_match = True
         for term in terms:
             token = _normalize_token(term)
             if token == lowered:
                 score += 6
+                has_match = True
             elif _normalize_token(token) == normalized_name:
                 score += 5
-            elif token in name_tokens:
+                has_match = True
+            elif any(_tokens_match(token, name_token) for name_token in name_tokens):
                 score += 4
+                has_match = True
             elif token and len(token) >= 5 and token in lowered:
                 score += 3
+                has_match = True
         score += _entity_name_quality(name)
-        scored.append((score, name))
+        if has_match:
+            scored.append((score, name))
 
     ranked = sorted(scored, key=lambda item: (item[0], -len(item[1])), reverse=True)
     ordered_names: list[str] = []
@@ -702,15 +806,15 @@ def _score_neighborhood_row(row: dict, anchor: str, terms: list[str], relation_h
     relation_tokens = set(_tokenize_value(relation_text))
     for term in terms:
         token = _normalize_token(term)
-        if token in subject_tokens:
+        if any(_tokens_match(token, item) for item in subject_tokens):
             score += 2
         elif token and len(token) >= 5 and token in subject_lower:
             score += 1
-        if token in object_tokens:
+        if any(_tokens_match(token, item) for item in object_tokens):
             score += 2
         elif token and len(token) >= 5 and token in object_lower:
             score += 1
-        if token in relation_tokens:
+        if any(_tokens_match(token, item) for item in relation_tokens):
             score += 2
         elif token and len(token) >= 5 and token in relation_text:
             score += 1
@@ -794,6 +898,21 @@ def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], te
                 return f"{anchor} founded {_join_values(grouped_objects['FOUNDED'])}."
             if "FOUNDED_BY" in grouped_objects:
                 return f"{anchor} was founded by {_join_values(grouped_objects['FOUNDED_BY'])}."
+        if relation_hints & {"STARTED", "STARTED_IN", "STARTED_ON", "BEGAN", "BEGAN_IN", "BEGAN_ON", "CONVENED_IN"}:
+            for relation_upper in ("STARTED_ON", "STARTED_IN", "STARTED", "BEGAN_ON", "BEGAN_IN", "BEGAN", "CONVENED_IN"):
+                if relation_upper in grouped_objects and grouped_objects[relation_upper]:
+                    values = grouped_objects[relation_upper]
+                    verb = _adjust_verb_for_subject(anchor, _verb_from_relation(relation_upper))
+                    return f"{anchor} {verb} {_join_values(values)}."
+        matched_lines = []
+        for relation_upper in sorted(relation_hints):
+            if relation_upper not in grouped_objects:
+                continue
+            values = grouped_objects[relation_upper]
+            verb = _adjust_verb_for_subject(anchor, _verb_from_relation(relation_upper))
+            matched_lines.append(f"{anchor} {verb} {_join_values(values)}")
+        if matched_lines:
+            return "; ".join(matched_lines) + "."
         for relation_upper in sorted(relation_hints):
             if relation_upper in incoming_relations:
                 return "; ".join(
@@ -876,6 +995,9 @@ def ask_question(question: str, document_id: str) -> dict:
         expanded_terms = _expand_terms(terms)
         relation_hints = _extract_relation_hints(question)
         relation_groups = _extract_relation_groups(question)
+        if not _is_explicit_relation_question(question, relation_hints):
+            relation_hints = set()
+            relation_groups = []
         should_use_multi_hop = _is_multi_hop_question(question, relation_groups)
 
         if _is_overview_question(question):
@@ -935,6 +1057,9 @@ def ask_question(question: str, document_id: str) -> dict:
         entity_cypher, entity_candidates = graph.find_relevant_entities(entity_search_terms, document_id, limit=12)
         anchor_entities = _rank_anchor_entities(terms or expanded_terms, entity_phrases, entity_candidates)
         for anchor_entity in anchor_entities[:5]:
+            if not relation_hints and _required_term_coverage(expanded_terms) >= 2:
+                if _count_term_coverage(anchor_entity, expanded_terms) < _required_term_coverage(expanded_terms):
+                    continue
             neighborhood_cypher, neighborhood_rows = graph.get_entity_neighborhood(anchor_entity, document_id, limit=200)
             if not neighborhood_rows:
                 continue
