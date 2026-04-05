@@ -22,6 +22,7 @@ venv/
 # Local app state / generated caches
 .active_document.json
 .triple_cache.json
+.document_chunks.json
 
 # Root-level PDFs used only for local upload tests
 /*.pdf

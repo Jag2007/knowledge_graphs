@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 import app
 from kg_app.api import server as app_server
 from kg_app.core import extractor, query_engine, utils
+from kg_app.state import chunk_store
 
 
 class FakeGraph:
@@ -158,6 +159,7 @@ class AppSmokeTests(unittest.TestCase):
         query_engine.Neo4jGraph = FakeGraph
         FakeGraph.stored = {}
         FakeGraph.summaries = {}
+        chunk_store.clear_all_document_chunks()
         self.active_document = {}
         app_server.set_active_document = self._set_active_document
         app_server.get_active_document = self._get_active_document
@@ -170,6 +172,7 @@ class AppSmokeTests(unittest.TestCase):
         app_server.extract_triples_groq = self.original_extract_triples
         app_server.set_active_document = self.original_set_active_document
         app_server.get_active_document = self.original_get_active_document
+        chunk_store.clear_all_document_chunks()
 
     def _set_active_document(self, document_id, file_name):
         self.active_document = {"document_id": document_id, "file_name": file_name}
@@ -252,6 +255,20 @@ class AppSmokeTests(unittest.TestCase):
         ask = self.client.post("/ask", json={"question": "what festivals are mentioned"})
         self.assertEqual(ask.status_code, 200)
         self.assertIn("Festivals", ask.json()["answer"])
+
+    def test_semantic_chunk_retrieval_answers_when_graph_is_too_weak(self):
+        app_server.extract_text_from_pdf = lambda _: (
+            "A good Constitution does not allow whims to change its basic structure. "
+            "It does not allow easy overthrow of provisions that guarantee rights of citizens."
+        )
+        app_server.extract_triples_groq = lambda chunk: [
+            {"subject": "Constitution", "relation": "INCLUDES", "object": "Rights"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "what is a good constitution"})
+        self.assertEqual(ask.status_code, 200)
+        self.assertIn("good Constitution", ask.json()["answer"])
+        self.assertIn("basic structure", ask.json()["answer"])
 
     def test_current_document_scope_prevents_cross_document_leakage(self):
         app_server.extract_text_from_pdf = lambda _: "Karnataka has capital Bengaluru."

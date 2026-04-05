@@ -15,6 +15,7 @@ from kg_app.core.extractor import extract_triples_groq
 from kg_app.db.graph import Neo4jGraph
 from kg_app.core.query_engine import ask_question
 from kg_app.state.document_store import set_active_document, get_active_document
+from kg_app.state.chunk_store import save_document_chunks
 
 app = FastAPI(title="Knowledge Graph Builder")
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -133,6 +134,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         summary = build_document_summary(file.filename, all_triples)
         graph.store_document(document_id, file.filename, summary)
         triples_added = graph.insert_triples(all_triples, document_id)
+        save_document_chunks(document_id, file.filename, chunks)
         set_active_document(document_id, file.filename)
         
         # Failsafe exactly as requested
