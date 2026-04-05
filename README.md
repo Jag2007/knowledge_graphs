@@ -1,24 +1,74 @@
 # Knowledge Graph Studio
 
-This project converts uploaded PDFs into a Neo4j knowledge graph and lets you ask questions from a clean FastAPI UI.
+A professional FastAPI-based Knowledge Graph application that converts PDFs into a Neo4j graph, then answers questions using a **hybrid retrieval pipeline**:
 
-The current backend is intentionally organized into small folders so the code is easier to read and maintain, while the app still starts with the same command:
+- **Graph retrieval** for precise entity and relation lookup
+- **Semantic chunk retrieval** for broader context and fuzzy question understanding
+
+The project is organized into small, maintainable folders while still keeping the entrypoint simple:
 
 ```bash
 uvicorn app:app --reload
 ```
 
-## What The App Does
+## Highlights
 
-- Reads a PDF and extracts text
-- Splits the text into sentence-aware overlapping chunks
-- Uses Groq to extract `(subject, relation, object)` triples from each chunk
-- Cleans, normalizes, deduplicates, and stores those triples in Neo4j
-- Tracks the currently uploaded document so answers stay scoped to that PDF
-- Retrieves answers from the graph using entity/relation-aware search and multi-hop path lookup
-- Serves a grey/white frontend where you can upload PDFs, ask questions, and inspect JSON
+- PDF upload to knowledge graph pipeline
+- Sentence-aware chunking with overlap
+- Triple extraction using Groq
+- Triple cleaning, normalization, and deduplication
+- Neo4j-backed document-scoped graph storage
+- Hybrid retrieval:
+  - graph-first lookup
+  - semantic chunk fallback
+  - multi-hop path support
+- Clean FastAPI frontend with JSON inspection
+- Local smoke tests for regression coverage
 
-## Folder Structure
+## Tech Stack
+
+### Backend
+
+- **Python**
+- **FastAPI**
+- **Uvicorn**
+- **python-dotenv**
+
+### Knowledge Graph
+
+- **Neo4j**
+- **neo4j Python driver**
+
+### LLM / Extraction
+
+- **Groq API**
+
+### PDF Processing
+
+- **PyMuPDF**
+
+### Testing
+
+- **unittest**
+- **FastAPI TestClient**
+
+## Architecture
+
+```text
+PDF
+ -> text extraction
+ -> sentence-aware chunking
+ -> Groq triple extraction
+ -> cleaning + normalization + deduplication
+ -> Neo4j document-scoped storage
+ -> hybrid retrieval
+    -> graph lookup
+    -> semantic chunk lookup
+    -> multi-hop fallback
+ -> final natural-language answer
+```
+
+## Project Structure
 
 ```text
 Knowledge Graphs/
@@ -42,6 +92,7 @@ Knowledge Graphs/
 │   │   └── graph.py
 │   └── state/
 │       ├── __init__.py
+│       ├── chunk_store.py
 │       └── document_store.py
 ├── static/
 │   ├── app.js
@@ -54,34 +105,97 @@ Knowledge Graphs/
 └── .gitignore
 ```
 
-## Why Root Files Still Exist
+## Why The Root Files Still Exist
 
-The root files `app.py`, `extractor.py`, `graph.py`, `query_engine.py`, `utils.py`, and `document_store.py` are tiny compatibility wrappers that import the real code from `kg_app/`.
+The root-level files:
 
-That keeps the project simple to run and avoids breaking `uvicorn app:app --reload`, while still giving us a cleaner folder-based codebase.
+- `app.py`
+- `extractor.py`
+- `graph.py`
+- `query_engine.py`
+- `utils.py`
+- `document_store.py`
 
-## Module Guide
+are intentionally kept as **small compatibility wrappers**.
 
-- `kg_app/api/server.py`
-  - FastAPI routes, PDF upload flow, question endpoint, and frontend serving
-- `kg_app/core/extractor.py`
-  - Groq triple extraction, JSON cleanup, relation/entity validation, and context-preserving triple enrichment
-- `kg_app/core/query_engine.py`
-  - Graph retrieval, entity/relation ranking, multi-hop path answering, and answer formatting
-- `kg_app/core/utils.py`
-  - PDF text extraction, sentence splitting, chunking, JSON recovery helpers, and relation normalization
-- `kg_app/db/graph.py`
-  - Neo4j connection, constraints, document-scoped triple writes, and graph search helpers
-- `kg_app/state/document_store.py`
-  - Active document tracking so `/ask` uses the most recently uploaded PDF
-- `static/`
-  - Frontend UI
-- `tests/test_smoke.py`
-  - API and retrieval regression tests
+That gives us two benefits:
+
+1. `uvicorn app:app --reload` still works exactly as expected
+2. the real implementation lives in a cleaner package layout under `kg_app/`
+
+## What Each Folder Does
+
+### `kg_app/api/`
+
+API routes and frontend serving.
+
+- [server.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/api/server.py)
+  - upload flow
+  - ask flow
+  - active-document handling
+  - frontend serving
+
+### `kg_app/core/`
+
+Core processing and retrieval logic.
+
+- [extractor.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/core/extractor.py)
+  - Groq triple extraction
+  - JSON recovery
+  - triple validation
+  - contextual triple linking
+
+- [query_engine.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/core/query_engine.py)
+  - graph retrieval
+  - semantic chunk retrieval
+  - hybrid answer selection
+  - multi-hop path formatting
+
+- [utils.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/core/utils.py)
+  - PDF text extraction
+  - sentence splitting
+  - chunking
+  - relation normalization
+  - JSON helpers
+
+### `kg_app/db/`
+
+Database integration.
+
+- [graph.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/db/graph.py)
+  - Neo4j connection
+  - schema setup
+  - document storage
+  - triple insertion
+  - graph search methods
+
+### `kg_app/state/`
+
+Local state used by the app runtime.
+
+- [document_store.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/state/document_store.py)
+  - remembers the currently active uploaded document
+
+- [chunk_store.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/state/chunk_store.py)
+  - stores document chunks used for semantic retrieval
+
+### `static/`
+
+Frontend files.
+
+- [index.html](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/static/index.html)
+- [style.css](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/static/style.css)
+- [app.js](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/static/app.js)
+
+### `tests/`
+
+Automated regression tests.
+
+- [test_smoke.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/tests/test_smoke.py)
 
 ## Setup
 
-### 1. Create and activate a virtual environment
+### 1. Create a virtual environment
 
 ```bash
 python3 -m venv .venv
@@ -94,7 +208,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Create `.env`
+### 3. Add environment variables
 
 Create a `.env` file in the project root:
 
@@ -105,11 +219,9 @@ NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=your_neo4j_password
 ```
 
-For Neo4j Aura, use your Aura URI in `NEO4J_URI`.
+If you use Neo4j Aura, put your Aura URI in `NEO4J_URI`.
 
 ## Run The App
-
-From the project root:
 
 ```bash
 uvicorn app:app --reload
@@ -120,18 +232,90 @@ Open:
 - Frontend: [http://127.0.0.1:8000](http://127.0.0.1:8000)
 - Swagger Docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
-## How To Use
+## How It Works
 
-1. Upload a PDF in the left panel
-2. Click **Build Knowledge Graph**
-3. Ask a question in the right panel
-4. Click **View JSON** if you want to inspect request/response payloads
+### 1. Upload a PDF
+
+The upload flow:
+
+- extracts PDF text
+- builds overlapping sentence-aware chunks
+- runs Groq triple extraction on each chunk
+- cleans and deduplicates triples
+- stores triples and summary in Neo4j
+- stores chunks locally for semantic retrieval
+- marks the uploaded file as the current active document
+
+### 2. Ask a Question
+
+The question flow:
+
+- scopes everything to the active uploaded document
+- tries graph retrieval first
+- tries entity neighborhood lookup
+- tries direct relation matching
+- tries semantic triple matching
+- tries multi-hop graph paths
+- uses semantic chunk retrieval when chunk context matches the question better
+
+## Hybrid Retrieval Strategy
+
+This project now uses a **hybrid retrieval approach**.
+
+### Graph Retrieval
+
+Best for:
+
+- direct factual questions
+- relation-specific questions
+- entity-to-entity queries
+- multi-hop graph questions
+
+Examples:
+
+- `Who is the father of the constitution?`
+- `What does Indian Constitution guarantee?`
+- `What is the capital of Karnataka?`
+
+### Semantic Chunk Retrieval
+
+Best for:
+
+- fuzzy phrasing
+- broader context questions
+- paragraph-level meaning
+- questions that are phrased differently from the exact triple wording
+
+Examples:
+
+- `What is a good constitution?`
+- `What is this PDF talking about?`
+
+### Why This Helps
+
+Graph retrieval gives **precision**.
+
+Semantic chunk retrieval gives **flexibility**.
+
+Together they reduce:
+
+- brittle keyword-only matching
+- false negatives on paraphrased questions
+- poor answers when the graph is too sparse for a broad question
 
 ## API Endpoints
 
 ### `POST /upload_pdf`
 
-Uploads a PDF, extracts triples, stores them in Neo4j, and marks that PDF as the active document.
+Uploads a PDF and builds the graph.
+
+Response includes:
+
+- `chunks_processed`
+- `triples_added`
+- `document_id`
+- `summary`
+- `sample_triples`
 
 ### `POST /ask`
 
@@ -143,11 +327,42 @@ Accepts:
 }
 ```
 
-Returns a document-scoped answer plus query/debug metadata.
+Returns:
 
-## Local Testing
+- `answer`
+- `results`
+- `query`
+- `steps`
+- `debug`
 
-Run the test suite:
+## Example Questions
+
+### Direct factual
+
+- `Who is the father of the constitution?`
+- `What does Indian Constitution guarantee?`
+- `What does festival include?`
+
+### Entity overview
+
+- `Indian Culture`
+- `What is Indian Constitution?`
+- `What is separation of powers?`
+
+### Broader/semantic
+
+- `What is this PDF talking about?`
+- `What is a good constitution?`
+- `What do you know about India and Pakistan separation?`
+
+### Multi-hop / indirect
+
+- `Constituent Assembly adopted on`
+- `When did Indian National Movement start?`
+
+## Testing
+
+Run the smoke suite:
 
 ```bash
 python -m unittest tests/test_smoke.py
@@ -156,12 +371,12 @@ python -m unittest tests/test_smoke.py
 Compile check:
 
 ```bash
-python -m py_compile app.py extractor.py graph.py query_engine.py utils.py document_store.py kg_app/api/server.py kg_app/core/extractor.py kg_app/core/query_engine.py kg_app/core/utils.py kg_app/db/graph.py kg_app/state/document_store.py tests/test_smoke.py
+python -m py_compile app.py extractor.py graph.py query_engine.py utils.py document_store.py kg_app/api/server.py kg_app/core/extractor.py kg_app/core/query_engine.py kg_app/core/utils.py kg_app/db/graph.py kg_app/state/document_store.py kg_app/state/chunk_store.py tests/test_smoke.py
 ```
 
-## Useful Environment Knobs
+## Tunable Environment Variables
 
-You can tune upload chunking and worker behavior with environment variables:
+These help control chunking and upload throughput:
 
 ```bash
 export KG_TARGET_WORDS=550
@@ -171,43 +386,72 @@ export KG_OVERLAP_WORDS=80
 export KG_UPLOAD_WORKERS=1
 ```
 
-Groq extraction logging:
+Groq debug logging:
 
 ```bash
 export KG_DEBUG_LLM_OUTPUT=1
 ```
 
-Set it to `0` if you want quieter terminal logs.
+Set it to `0` if you want quieter logs.
 
 ## Troubleshooting
 
-- **`GET /favicon.ico 404`**
-  - Harmless. The browser is just requesting a favicon that the app does not provide.
+### `GET /favicon.ico 404`
 
-- **Upload says no readable text was found**
-  - The PDF may be image-only/scanned. This app currently expects extractable text PDFs.
+Harmless browser request. It does not affect the app.
 
-- **Upload extracts too few triples**
-  - Try smaller chunks or more overlap using the `KG_*` env vars above.
-  - Also check whether the PDF text itself is being extracted cleanly.
+### No readable text found
 
-- **Answers seem unrelated**
-  - Re-upload the PDF after code changes so the active document graph is rebuilt.
-  - If Neo4j still contains older test data, remember that `/ask` is scoped to the most recently uploaded document through the active document tracker.
+The PDF is likely scanned/image-only. The current pipeline expects extractable text.
 
-- **Groq rate limit errors**
-  - The extractor retries, but large PDFs can still take time on strict limits.
-  - Reduce parallelism with `KG_UPLOAD_WORKERS=1` and use smaller chunks if needed.
+### Too few triples
 
-## Git Notes
+Try:
 
-`.gitignore` already excludes:
+- smaller chunks
+- more overlap
+- cleaner PDFs
+- lower upload worker count if rate limits are interfering
+
+### Answers feel unrelated
+
+Re-upload the PDF after code changes so:
+
+- triples are rebuilt
+- chunks are rebuilt
+- the active document points to the newest upload
+
+### Groq rate limits
+
+Large PDFs may slow down under strict account limits. If needed:
+
+- reduce worker count with `KG_UPLOAD_WORKERS=1`
+- use smaller chunk sizes
+- retry with a cleaner PDF
+
+## Git Hygiene
+
+The project already ignores non-essential and sensitive files in [.gitignore](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/.gitignore), including:
 
 - `.env`
-- local active-document/cache files
-- root-level test PDFs
+- active document state
+- semantic chunk cache
+- local triple cache
+- test PDFs in the root
 - virtual environments
 - Python cache folders
-- logs and editor/OS files
+- logs
+- editor/OS files
 
-So you can safely keep local test PDFs in the project root without committing them.
+That keeps the repository clean and safer to share.
+
+## Professional Notes
+
+This codebase is now structured to be:
+
+- easier to navigate
+- safer to run locally
+- clearer to document
+- simpler to extend
+
+The hybrid retrieval layer is especially useful because it keeps the app practical for real user phrasing instead of relying only on exact graph matches.
