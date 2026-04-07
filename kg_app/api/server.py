@@ -10,8 +10,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from kg_app.core.utils import extract_text_from_pdf, chunk_text
-from kg_app.core.extractor import extract_triples_groq
+from kg_app.core.utils import extract_text_from_pdf, extract_pdf_pages, build_hybrid_chunks
+from kg_app.core.extractor import extract_triples_groq, precompute_chunk_metadata
 from kg_app.db.graph import Neo4jGraph
 from kg_app.core.query_engine import ask_question
 from kg_app.state.document_store import set_active_document, get_active_document
@@ -80,27 +80,34 @@ async def upload_pdf(file: UploadFile = File(...)):
                 "trace": "",
             }
         
-        # 1. Process PDF into text
-        text = extract_text_from_pdf(content)
+        # 1. Process PDF into page-aware text
+        try:
+            pages = extract_pdf_pages(content)
+        except Exception:
+            pages = [{"page": 1, "text": extract_text_from_pdf(content)}]
+        text = "\n".join(page["text"] for page in pages)
         if not text.strip():
             return {
                 "error": "No readable text was found in the uploaded PDF.",
                 "trace": "",
             }
         
-        # 2. Split text into larger chunks to reduce total LLM calls on big PDFs.
-        chunks = chunk_text(
-            text,
+        # 2. Build rich hybrid chunks: headings + paragraphs + sentence-safe sliding overlap.
+        chunks = build_hybrid_chunks(
+            pages,
             target_words=UPLOAD_TARGET_WORDS,
             min_words=UPLOAD_MIN_WORDS,
             max_words=UPLOAD_MAX_WORDS,
-            overlap_words=UPLOAD_OVERLAP_WORDS,
+            overlap_ratio=UPLOAD_OVERLAP_WORDS / max(1, UPLOAD_TARGET_WORDS),
         )
         if not chunks:
             return {
                 "error": "The document could not be split into usable text chunks.",
                 "trace": "",
             }
+
+        chunks = precompute_chunk_metadata(chunks)
+        chunk_texts = [chunk["text"] for chunk in chunks]
         
         graph = Neo4jGraph()
         document_id = str(uuid.uuid4())
@@ -109,7 +116,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         seen = set()
         loop = asyncio.get_running_loop()
         with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as executor:
-            tasks = [loop.run_in_executor(executor, extract_triples_groq, chunk) for chunk in chunks]
+            tasks = [loop.run_in_executor(executor, extract_triples_groq, chunk_text) for chunk_text in chunk_texts]
             raw_batches = await asyncio.gather(*tasks, return_exceptions=True)
 
         triple_batches: list[list[dict]] = []

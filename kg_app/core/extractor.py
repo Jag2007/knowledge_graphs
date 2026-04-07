@@ -128,6 +128,76 @@ def _call_groq_with_retry(client: Groq, *, model: str, prompt: str):
     raise last_error if last_error else RuntimeError("Groq extraction failed.")
 
 
+def precompute_chunk_metadata(chunks: list[dict]) -> list[dict]:
+    """
+    Enrich chunk JSON with LLM-generated summaries and keywords in one ingestion-time call.
+    If the LLM call fails, the heuristic metadata already on each chunk is kept.
+    """
+    if not chunks:
+        return []
+
+    max_chunks = max(1, int(os.environ.get("KG_METADATA_MAX_CHUNKS", "30")))
+    model = os.environ.get("GROQ_METADATA_MODEL", os.environ.get("GROQ_TRIPLE_MODEL", "llama-3.1-8b-instant"))
+    payload = [
+        {
+            "id": chunk.get("id", f"chunk_{index + 1}"),
+            "text": str(chunk.get("text", ""))[:900],
+        }
+        for index, chunk in enumerate(chunks[:max_chunks])
+        if str(chunk.get("text", "")).strip()
+    ]
+    if not payload:
+        return chunks
+
+    prompt = f"""
+Create retrieval metadata for these PDF chunks.
+
+STRICT RULES:
+- Output ONLY valid JSON
+- Return a JSON list
+- Each item must be:
+  {{"id": "chunk_1", "summary": "...", "keywords": ["...", "..."]}}
+- Summary must be one short sentence
+- Keywords must be 3 to 8 important topic words or phrases
+- Do not invent facts
+
+Chunks:
+{json.dumps(payload, ensure_ascii=False)}
+""".strip()
+
+    try:
+        client = _get_client()
+        completion = _call_groq_with_retry(client, model=model, prompt=prompt)
+        content = completion.choices[0].message.content or ""
+        metadata = json.loads(extract_first_json(content))
+        if not isinstance(metadata, list):
+            return chunks
+
+        by_id = {
+            str(item.get("id", "")).strip(): item
+            for item in metadata
+            if isinstance(item, dict) and item.get("id")
+        }
+        enriched: list[dict] = []
+        for chunk in chunks:
+            updated = dict(chunk)
+            item = by_id.get(str(chunk.get("id", "")).strip())
+            if item:
+                summary = str(item.get("summary", "")).strip()
+                keywords = item.get("keywords", [])
+                if summary:
+                    updated["summary"] = summary
+                if isinstance(keywords, list):
+                    cleaned_keywords = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
+                    if cleaned_keywords:
+                        updated["keywords"] = cleaned_keywords[:8]
+            enriched.append(updated)
+        return enriched
+    except Exception as error:
+        print(f"Chunk metadata enrichment skipped: {error}")
+        return chunks
+
+
 def _split_compound_entity(value: str) -> list[str]:
     """Split simple conjunction/list mentions into separate entity values."""
     text = re.sub(r"\s+", " ", str(value or "").strip())

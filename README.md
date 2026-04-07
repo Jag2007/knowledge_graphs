@@ -14,7 +14,8 @@ uvicorn app:app --reload
 ## Highlights
 
 - PDF upload to knowledge graph pipeline
-- Sentence-aware chunking with overlap
+- Hybrid chunking using headings, paragraphs, sentences, hierarchy, and overlap
+- Rich JSON chunks with summaries, keywords, sections, and page numbers
 - Triple extraction using Groq
 - Triple cleaning, normalization, and deduplication
 - Neo4j-backed document-scoped graph storage
@@ -43,6 +44,13 @@ uvicorn app:app --reload
 
 - **Groq API**
 
+### Semantic Retrieval
+
+- Local normalized chunk embeddings
+- `sentence-transformers` backend with BGE by default
+- Safe local fallback if the transformer model cannot load
+- Weighted hybrid scoring
+
 ### PDF Processing
 
 - **PyMuPDF**
@@ -57,13 +65,21 @@ uvicorn app:app --reload
 ```text
 PDF
  -> text extraction
- -> sentence-aware chunking
+ -> page-aware text extraction
+ -> hybrid chunking
+    -> heading detection
+    -> paragraph grouping
+    -> sentence-safe sliding window
+    -> 15-25% overlap
+    -> chunk summary + keyword metadata
  -> Groq triple extraction
  -> cleaning + normalization + deduplication
  -> Neo4j document-scoped storage
  -> hybrid retrieval
     -> graph lookup
+    -> query embedding
     -> semantic chunk lookup
+    -> weighted re-ranking
     -> multi-hop fallback
  -> final natural-language answer
 ```
@@ -238,13 +254,32 @@ Open:
 
 The upload flow:
 
-- extracts PDF text
-- builds overlapping sentence-aware chunks
+- extracts page-aware PDF text
+- builds rich hybrid chunks using headings, paragraphs, and sentence boundaries
+- applies sliding-window overlap so context carries between chunks
+- precomputes summary and keyword metadata for each chunk
 - runs Groq triple extraction on each chunk
 - cleans and deduplicates triples
 - stores triples and summary in Neo4j
 - stores chunks locally for semantic retrieval
+- stores normalized chunk embeddings alongside the chunk JSON
 - marks the uploaded file as the current active document
+
+Each stored chunk has this shape:
+
+```json
+{
+  "id": "chunk_1",
+  "text": "...",
+  "summary": "...",
+  "keywords": ["queue", "hospital"],
+  "section": "Introduction",
+  "page": 2,
+  "embedding": [0.123, 0.456]
+}
+```
+
+The chunker is designed to avoid splitting mid-sentence. It uses the PDF page as the top-level hierarchy, section headings when they are visible, paragraph blocks as semantic boundaries, and sentence-level sliding windows for overlap.
 
 ### 2. Ask a Question
 
@@ -252,10 +287,15 @@ The question flow:
 
 - scopes everything to the active uploaded document
 - tries graph retrieval first
+- extracts likely entities from the query
+- expands the query using graph entities
 - tries entity neighborhood lookup
 - tries direct relation matching
 - tries semantic triple matching
 - tries multi-hop graph paths
+- converts the question into an embedding
+- scores chunks with embedding similarity, keyword score, fuzzy score, and graph boost
+- re-ranks the best chunk candidates and keeps the strongest context
 - uses semantic chunk retrieval when chunk context matches the question better
 
 ## Hybrid Retrieval Strategy
@@ -290,6 +330,37 @@ Examples:
 
 - `What is a good constitution?`
 - `What is this PDF talking about?`
+
+### Hybrid Scoring Formula
+
+```text
+final_score =
+  0.5 * embedding_similarity +
+  0.2 * keyword_score +
+  0.1 * fuzzy_score +
+  0.2 * graph_score
+```
+
+The graph score boosts chunks that contain entities discovered from the Neo4j graph. The app also uses a retrieval threshold so weak chunk matches do not become false answers.
+
+By default, `KG_EMBEDDING_BACKEND=auto` tries `sentence-transformers` first with `BAAI/bge-small-en-v1.5`. If the model cannot load, the app falls back to a local deterministic normalized embedding so it still runs.
+
+```bash
+export KG_EMBEDDING_BACKEND=auto
+export KG_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+```
+
+If you want to force the transformer model:
+
+```bash
+export KG_EMBEDDING_BACKEND=sentence-transformers
+```
+
+If you want the lightweight fallback:
+
+```bash
+export KG_EMBEDDING_BACKEND=local
+```
 
 ### Why This Helps
 
@@ -384,7 +455,16 @@ export KG_MIN_WORDS=380
 export KG_MAX_WORDS=700
 export KG_OVERLAP_WORDS=80
 export KG_UPLOAD_WORKERS=1
+export KG_METADATA_MAX_CHUNKS=30
+export KG_EMBEDDING_BACKEND=auto
+export KG_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 ```
+
+`KG_OVERLAP_WORDS` is converted into an overlap ratio for the hybrid chunker. The chunker clamps overlap into the recommended 15-25% range so context is preserved without creating too much duplication.
+
+`KG_METADATA_MAX_CHUNKS` controls how many chunk excerpts are sent in the single ingestion-time metadata enrichment call. If Groq is unavailable or rate-limited, the app keeps the local heuristic summaries and keywords instead of failing the upload.
+
+`KG_EMBEDDING_BACKEND=auto` tries sentence-transformers first and safely falls back to the local embedding. `KG_EMBEDDING_BACKEND=local` forces the built-in dependency-free embedding fallback.
 
 Groq debug logging:
 

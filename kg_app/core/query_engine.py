@@ -2,8 +2,17 @@ import re
 from difflib import SequenceMatcher
 
 from kg_app.db.graph import Neo4jGraph
+from kg_app.core.embeddings import cosine_similarity, embed_text
 from kg_app.core.utils import split_into_sentences
 from kg_app.state.chunk_store import get_document_chunks
+
+HYBRID_WEIGHTS = {
+    "embedding": 0.5,
+    "keyword": 0.2,
+    "fuzzy": 0.1,
+    "graph": 0.2,
+}
+MIN_HYBRID_SCORE = 0.12
 
 STOP_WORDS = {
     "a",
@@ -772,18 +781,89 @@ def _score_text_passage(text: str, terms: list[str], phrases: list[str], relatio
     return score
 
 
-def _search_semantic_chunks(document_id: str, question: str, terms: list[str], phrases: list[str], relation_hints: set[str], limit: int = 5) -> list[dict]:
+def _normalise_score(value: float, cap: float) -> float:
+    if cap <= 0:
+        return 0.0
+    return max(0.0, min(1.0, float(value) / cap))
+
+
+def _graph_entity_boost(searchable_text: str, graph_entities: list[str]) -> float:
+    if not graph_entities:
+        return 0.0
+    lowered = searchable_text.lower()
+    hits = 0
+    for entity in graph_entities:
+        entity_text = _clean_entity_text(entity).lower()
+        if entity_text and entity_text in lowered:
+            hits += 1
+    return min(1.0, hits / max(1, min(len(graph_entities), 5)))
+
+
+def _hybrid_chunk_score(
+    *,
+    embedding_score: float,
+    keyword_score: float,
+    fuzzy_score: float,
+    graph_score: float,
+) -> float:
+    return (
+        HYBRID_WEIGHTS["embedding"] * embedding_score
+        + HYBRID_WEIGHTS["keyword"] * keyword_score
+        + HYBRID_WEIGHTS["fuzzy"] * fuzzy_score
+        + HYBRID_WEIGHTS["graph"] * graph_score
+    )
+
+
+def _search_semantic_chunks(
+    document_id: str,
+    question: str,
+    terms: list[str],
+    phrases: list[str],
+    relation_hints: set[str],
+    graph_entities: list[str] | None = None,
+    limit: int = 5,
+) -> list[dict]:
     chunks = get_document_chunks(document_id)
     if not chunks:
         return []
 
     hits: list[dict] = []
+    query_embedding = embed_text(question)
+    graph_entities = graph_entities or []
+
     for chunk in chunks:
-        chunk_score = _score_text_passage(chunk, terms, phrases, relation_hints, question)
-        if chunk_score <= 0:
+        chunk_text = str(chunk.get("text", "") if isinstance(chunk, dict) else chunk).strip()
+        if not chunk_text:
+            continue
+        keywords = chunk.get("keywords", []) if isinstance(chunk, dict) else []
+        searchable_text = " ".join(
+            [
+                chunk_text,
+                str(chunk.get("summary", "") if isinstance(chunk, dict) else ""),
+                " ".join(keywords if isinstance(keywords, list) else []),
+                str(chunk.get("section", "") if isinstance(chunk, dict) else ""),
+            ]
+        )
+        fuzzy_raw = _score_text_passage(searchable_text, terms, phrases, relation_hints, question)
+        keyword_raw = _count_term_coverage(" ".join(keywords if isinstance(keywords, list) else []), terms)
+        if not keyword_raw:
+            keyword_raw = _count_term_coverage(str(chunk.get("summary", "") if isinstance(chunk, dict) else ""), terms)
+
+        embedding_score = cosine_similarity(query_embedding, chunk.get("embedding", []) if isinstance(chunk, dict) else [])
+        keyword_score = _normalise_score(keyword_raw, max(1, min(len(terms), 5)))
+        fuzzy_score = _normalise_score(fuzzy_raw, 40)
+        graph_score = _graph_entity_boost(searchable_text, graph_entities)
+        final_score = _hybrid_chunk_score(
+            embedding_score=embedding_score,
+            keyword_score=keyword_score,
+            fuzzy_score=fuzzy_score,
+            graph_score=graph_score,
+        )
+
+        if final_score < MIN_HYBRID_SCORE:
             continue
 
-        candidate_sentences = split_into_sentences(chunk) or [chunk]
+        candidate_sentences = split_into_sentences(chunk_text) or [chunk_text]
         ranked_sentences = sorted(
             candidate_sentences,
             key=lambda sentence: _score_text_passage(sentence, terms, phrases, relation_hints, question),
@@ -813,12 +893,31 @@ def _search_semantic_chunks(document_id: str, question: str, terms: list[str], p
         hits.append(
             {
                 "chunk": chunk,
-                "score": chunk_score,
+                "chunk_id": chunk.get("id", "") if isinstance(chunk, dict) else "",
+                "text": chunk_text,
+                "score": final_score,
+                "embedding_score": embedding_score,
+                "keyword_score": keyword_score,
+                "fuzzy_score": fuzzy_score,
+                "graph_score": graph_score,
                 "sentences": selected_sentences,
+                "summary": chunk.get("summary", "") if isinstance(chunk, dict) else "",
+                "keywords": chunk.get("keywords", []) if isinstance(chunk, dict) else [],
+                "section": chunk.get("section", "Document") if isinstance(chunk, dict) else "Document",
+                "page": chunk.get("page") if isinstance(chunk, dict) else None,
             }
         )
 
-    return sorted(hits, key=lambda hit: hit["score"], reverse=True)[:limit]
+    reranked = sorted(
+        sorted(hits, key=lambda hit: hit["score"], reverse=True)[:15],
+        key=lambda hit: (
+            hit["score"],
+            _count_term_coverage(" ".join(hit.get("sentences", [])), terms),
+            hit.get("graph_score", 0),
+        ),
+        reverse=True,
+    )
+    return reranked[:limit]
 
 
 def _format_chunk_answer(question: str, hits: list[dict], terms: list[str]) -> str:
@@ -927,7 +1026,25 @@ def _response_with_chunk_fallback(base_response: dict, question: str, chunk_hits
     return {
         **base_response,
         "query": "HYBRID_GRAPH_PLUS_CHUNKS",
-        "results": base_response.get("results", []) + [{"chunk": hit["chunk"], "sentences": hit["sentences"], "score": hit["score"]} for hit in chunk_hits[:3]],
+        "results": base_response.get("results", []) + [
+            {
+                "chunk": hit["chunk"],
+                "chunk_id": hit.get("chunk_id", ""),
+                "sentences": hit["sentences"],
+                "score": hit["score"],
+                "score_breakdown": {
+                    "embedding": hit.get("embedding_score", 0),
+                    "keyword": hit.get("keyword_score", 0),
+                    "fuzzy": hit.get("fuzzy_score", 0),
+                    "graph": hit.get("graph_score", 0),
+                },
+                "summary": hit.get("summary", ""),
+                "keywords": hit.get("keywords", []),
+                "section": hit.get("section", "Document"),
+                "page": hit.get("page"),
+            }
+            for hit in chunk_hits[:3]
+        ],
         "answer": chunk_answer,
         "steps_taken": steps,
     }
@@ -1208,7 +1325,23 @@ def ask_question(question: str, document_id: str) -> dict:
             relation_hints = set()
             relation_groups = []
         should_use_multi_hop = _is_multi_hop_question(question, relation_groups)
-        chunk_hits = _search_semantic_chunks(document_id, question, expanded_terms, entity_phrases, relation_hints, limit=5)
+        entity_search_terms = entity_phrases + (terms or expanded_terms)
+        entity_cypher, entity_candidates = graph.find_relevant_entities(entity_search_terms, document_id, limit=12)
+        anchor_entities = _rank_anchor_entities(terms or expanded_terms, entity_phrases, entity_candidates)
+        graph_expanded_terms = list(expanded_terms)
+        for entity_name in anchor_entities[:5]:
+            for token in _tokenize_value(entity_name):
+                if token not in graph_expanded_terms and token not in STOP_WORDS:
+                    graph_expanded_terms.append(token)
+        chunk_hits = _search_semantic_chunks(
+            document_id,
+            question,
+            graph_expanded_terms,
+            entity_phrases,
+            relation_hints,
+            graph_entities=anchor_entities[:8],
+            limit=5,
+        )
 
         if _is_overview_question(question):
             summary = graph.get_document_summary(document_id)
@@ -1221,12 +1354,12 @@ def ask_question(question: str, document_id: str) -> dict:
                     "steps_taken": [
                         {
                             "step": "document_summary",
-                            "terms": expanded_terms,
+                            "terms": graph_expanded_terms,
                             "matches": 1,
                         }
                     ],
                 }
-                return _response_with_chunk_fallback(response, question, chunk_hits, expanded_terms, relation_hints, entity_phrases)
+                return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
             overview_cypher, overview_results = graph.get_graph_overview(document_id, limit=12)
             if overview_results:
@@ -1238,12 +1371,12 @@ def ask_question(question: str, document_id: str) -> dict:
                     "steps_taken": [
                         {
                             "step": "graph_overview",
-                            "terms": expanded_terms,
+                            "terms": graph_expanded_terms,
                             "matches": len(overview_results),
                         }
                     ],
                 }
-                return _response_with_chunk_fallback(response, question, chunk_hits, expanded_terms, relation_hints, entity_phrases)
+                return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
         path_cypher = ""
         if should_use_multi_hop:
@@ -1258,17 +1391,14 @@ def ask_question(question: str, document_id: str) -> dict:
                     "steps_taken": [
                         {
                             "step": "multi_hop_lookup",
-                            "terms": expanded_terms,
+                            "terms": graph_expanded_terms,
                             "relation_hints": sorted(relation_hints),
                             "matches": len(path_results),
                         }
                     ],
                 }
-                return _response_with_chunk_fallback(response, question, chunk_hits, expanded_terms, relation_hints, entity_phrases)
+                return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
-        entity_search_terms = entity_phrases + (terms or expanded_terms)
-        entity_cypher, entity_candidates = graph.find_relevant_entities(entity_search_terms, document_id, limit=12)
-        anchor_entities = _rank_anchor_entities(terms or expanded_terms, entity_phrases, entity_candidates)
         for anchor_entity in anchor_entities[:5]:
             if not relation_hints and _required_term_coverage(expanded_terms) >= 2:
                 if _count_term_coverage(anchor_entity, expanded_terms) < _required_term_coverage(expanded_terms):
@@ -1301,13 +1431,13 @@ def ask_question(question: str, document_id: str) -> dict:
                     {
                         "step": step_name,
                         "anchor": anchor_entity,
-                        "terms": expanded_terms,
+                        "terms": graph_expanded_terms,
                         "relation_hints": sorted(relation_hints),
                         "matches": len(neighborhood_rows),
                     }
                 ],
             }
-            return _response_with_chunk_fallback(response, question, chunk_hits, expanded_terms, relation_hints, entity_phrases)
+            return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
         direct_cypher, direct_results = graph.search_related(expanded_terms, document_id, limit=25)
         if direct_results:
@@ -1326,7 +1456,7 @@ def ask_question(question: str, document_id: str) -> dict:
                         }
                     ],
                 }
-                return _response_with_chunk_fallback(response, question, chunk_hits, expanded_terms, relation_hints, entity_phrases)
+                return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
         semantic_cypher, semantic_results = graph.search_semantic(expanded_terms, document_id, limit=40)
         if semantic_results:
@@ -1345,7 +1475,7 @@ def ask_question(question: str, document_id: str) -> dict:
                         }
                     ],
                 }
-                return _response_with_chunk_fallback(response, question, chunk_hits, expanded_terms, relation_hints, entity_phrases)
+                return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
         path_cypher, path_results = graph.search_paths(expanded_terms, document_id, max_hops=3, limit=80)
         if path_results:
@@ -1365,19 +1495,37 @@ def ask_question(question: str, document_id: str) -> dict:
                         }
                     ],
                 }
-                return _response_with_chunk_fallback(response, question, chunk_hits, expanded_terms, relation_hints, entity_phrases)
+                return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
-        chunk_answer = _format_chunk_answer(question, chunk_hits, expanded_terms)
+        chunk_answer = _format_chunk_answer(question, chunk_hits, graph_expanded_terms)
         if chunk_answer:
             return {
                 "triples_added": total_triples,
                 "query": "SEMANTIC_CHUNK_LOOKUP",
-                "results": [{"chunk": hit["chunk"], "sentences": hit["sentences"], "score": hit["score"]} for hit in chunk_hits[:3]],
+                "results": [
+                    {
+                        "chunk": hit["chunk"],
+                        "chunk_id": hit.get("chunk_id", ""),
+                        "sentences": hit["sentences"],
+                        "score": hit["score"],
+                        "score_breakdown": {
+                            "embedding": hit.get("embedding_score", 0),
+                            "keyword": hit.get("keyword_score", 0),
+                            "fuzzy": hit.get("fuzzy_score", 0),
+                            "graph": hit.get("graph_score", 0),
+                        },
+                        "summary": hit.get("summary", ""),
+                        "keywords": hit.get("keywords", []),
+                        "section": hit.get("section", "Document"),
+                        "page": hit.get("page"),
+                    }
+                    for hit in chunk_hits[:3]
+                ],
                 "answer": chunk_answer,
                 "steps_taken": [
                     {
                         "step": "semantic_chunk_lookup",
-                        "terms": expanded_terms,
+                        "terms": graph_expanded_terms,
                         "matches": len(chunk_hits),
                     }
                 ],

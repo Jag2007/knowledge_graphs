@@ -6,3 +6,4 @@ fastapi
 uvicorn
 pymupdf
 python-multipart
+sentence-transformers

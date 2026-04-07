@@ -1,15 +1,63 @@
 import json
 import fitz  # PyMuPDF
 import re
+from collections import Counter
+
+
+KEYWORD_STOP_WORDS = {
+    "about",
+    "after",
+    "also",
+    "among",
+    "because",
+    "before",
+    "being",
+    "between",
+    "could",
+    "does",
+    "during",
+    "each",
+    "from",
+    "have",
+    "into",
+    "more",
+    "other",
+    "over",
+    "such",
+    "than",
+    "that",
+    "their",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "through",
+    "under",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "with",
+    "would",
+}
+
+
+def extract_pdf_pages(file_bytes: bytes) -> list[dict]:
+    """Extract page-aware PDF text so chunks can keep page metadata."""
+    pages: list[dict] = []
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    for index, page in enumerate(doc, start=1):
+        text = page.get_text() or ""
+        if text.strip():
+            pages.append({"page": index, "text": text})
+    return pages
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     """Extract text from a PDF file using PyMuPDF."""
-    text = ""
-    # PyMuPDF can open from memory (bytes)
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    for page in doc:
-        text += page.get_text() + "\n"
-    return text
+    return "\n".join(page["text"] for page in extract_pdf_pages(file_bytes))
 
 def chunk_text(
     text: str,
@@ -83,6 +131,195 @@ def chunk_text(
         deduped_chunks.append(chunk.strip())
 
     return deduped_chunks
+
+
+def build_hybrid_chunks(
+    pages: list[dict],
+    target_words: int = 550,
+    min_words: int = 380,
+    max_words: int = 700,
+    overlap_ratio: float = 0.20,
+) -> list[dict]:
+    """
+    Build rich JSON chunks using a hybrid strategy:
+    - page hierarchy
+    - heading/section awareness
+    - paragraph and sentence boundaries
+    - sliding-window overlap
+    """
+    overlap_words = max(1, int(target_words * min(max(overlap_ratio, 0.15), 0.25)))
+    sentence_units = _build_sentence_units(pages)
+    if not sentence_units:
+        return []
+
+    chunks: list[dict] = []
+    current_units: list[dict] = []
+    current_words = 0
+
+    def flush_current() -> None:
+        if not current_units:
+            return
+        chunk = _make_chunk(len(chunks) + 1, current_units)
+        if chunk["text"]:
+            chunks.append(chunk)
+
+    for unit in sentence_units:
+        unit_words = len(unit["text"].split())
+        if current_units and current_words + unit_words > max_words:
+            flush_current()
+            current_units, current_words = _overlap_units(current_units, overlap_words)
+
+        current_units.append(unit)
+        current_words += unit_words
+
+        if current_words >= target_words:
+            flush_current()
+            current_units, current_words = _overlap_units(current_units, overlap_words)
+
+    if current_units:
+        flush_current()
+
+    if len(chunks) >= 2 and len(chunks[-1]["text"].split()) < min_words:
+        previous_words = len(chunks[-2]["text"].split())
+        last_words = len(chunks[-1]["text"].split())
+        if previous_words + last_words <= max_words:
+            merged_units = chunks[-2].get("_units", []) + chunks[-1].get("_units", [])
+            chunks[-2] = _make_chunk(len(chunks) - 1, merged_units)
+            chunks.pop()
+
+    clean_chunks: list[dict] = []
+    seen = set()
+    for chunk in chunks:
+        text_key = re.sub(r"\s+", " ", chunk["text"]).strip().lower()
+        if not text_key or text_key in seen:
+            continue
+        seen.add(text_key)
+        chunk.pop("_units", None)
+        chunk["id"] = f"chunk_{len(clean_chunks) + 1}"
+        clean_chunks.append(chunk)
+
+    return clean_chunks
+
+
+def _build_sentence_units(pages: list[dict]) -> list[dict]:
+    units: list[dict] = []
+    current_section = "Document"
+
+    for page in pages:
+        page_number = int(page.get("page", 0) or 0)
+        text = str(page.get("text", ""))
+        for block in _split_paragraph_blocks(text):
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            if len(lines) == 1 and _looks_like_heading(lines[0]):
+                current_section = lines[0].strip()
+                continue
+
+            paragraph = re.sub(r"\s+", " ", block).strip()
+            if not paragraph:
+                continue
+
+            for sentence in split_into_sentences(paragraph):
+                units.append(
+                    {
+                        "text": sentence,
+                        "section": current_section,
+                        "page": page_number,
+                    }
+                )
+
+    return units
+
+
+def _split_paragraph_blocks(text: str) -> list[str]:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    blocks = re.split(r"\n\s*\n+", normalized)
+    if len(blocks) > 1:
+        return [block.strip() for block in blocks if block.strip()]
+
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        if _looks_like_heading(line):
+            if current:
+                paragraphs.append(" ".join(current))
+                current = []
+            paragraphs.append(line)
+            continue
+        current.append(line)
+    if current:
+        paragraphs.append(" ".join(current))
+    return paragraphs
+
+
+def _looks_like_heading(line: str) -> bool:
+    text = line.strip()
+    if not text or len(text) > 90:
+        return False
+    if text.endswith((".", ",", ";")):
+        return False
+    words = text.split()
+    if len(words) > 10:
+        return False
+    if re.match(r"^\d+(\.\d+)*\.?\s+[A-Z]", text):
+        return True
+    alpha = re.sub(r"[^A-Za-z]", "", text)
+    if alpha and text.upper() == text and len(alpha) >= 4:
+        return True
+    title_words = sum(1 for word in words if word[:1].isupper())
+    return bool(words) and title_words >= max(1, len(words) - 1)
+
+
+def _overlap_units(units: list[dict], overlap_words: int) -> tuple[list[dict], int]:
+    overlap: list[dict] = []
+    word_count = 0
+    for unit in reversed(units):
+        unit_words = len(unit["text"].split())
+        if overlap and word_count + unit_words > overlap_words:
+            break
+        overlap.insert(0, unit)
+        word_count += unit_words
+    return overlap, word_count
+
+
+def _make_chunk(index: int, units: list[dict]) -> dict:
+    text = " ".join(unit["text"] for unit in units).strip()
+    sections = [unit.get("section", "Document") for unit in units if unit.get("section")]
+    pages = [int(unit.get("page", 0) or 0) for unit in units if unit.get("page")]
+    section = _most_common(sections) or "Document"
+    page = min(pages) if pages else None
+    return {
+        "id": f"chunk_{index}",
+        "text": text,
+        "summary": summarize_text(text),
+        "keywords": extract_keywords(text),
+        "section": section,
+        "page": page,
+        "_units": list(units),
+    }
+
+
+def _most_common(values: list[str]) -> str:
+    if not values:
+        return ""
+    return Counter(values).most_common(1)[0][0]
+
+
+def extract_keywords(text: str, limit: int = 8) -> list[str]:
+    tokens = [
+        token.lower()
+        for token in re.findall(r"[A-Za-z][A-Za-z-]{2,}", str(text or ""))
+        if token.lower() not in KEYWORD_STOP_WORDS and len(token) > 2
+    ]
+    counts = Counter(tokens)
+    return [word for word, _ in counts.most_common(limit)]
+
+
+def summarize_text(text: str, max_sentences: int = 2) -> str:
+    sentences = split_into_sentences(text)
+    if not sentences:
+        return ""
+    return " ".join(sentences[:max_sentences]).strip()
 
 def split_into_sentences(text: str) -> list[str]:
     """Split text into a list of sentences cleanly. (Legacy)"""

@@ -1,3 +1,4 @@
+import os
 import unittest
 
 from fastapi.testclient import TestClient
@@ -6,6 +7,8 @@ import app
 from kg_app.api import server as app_server
 from kg_app.core import extractor, query_engine, utils
 from kg_app.state import chunk_store
+
+os.environ.setdefault("KG_EMBEDDING_BACKEND", "local")
 
 
 class FakeGraph:
@@ -152,11 +155,13 @@ class AppSmokeTests(unittest.TestCase):
         self.original_graph_query = query_engine.Neo4jGraph
         self.original_extract_text = app_server.extract_text_from_pdf
         self.original_extract_triples = app_server.extract_triples_groq
+        self.original_precompute_metadata = app_server.precompute_chunk_metadata
         self.original_set_active_document = app_server.set_active_document
         self.original_get_active_document = app_server.get_active_document
 
         app_server.Neo4jGraph = FakeGraph
         query_engine.Neo4jGraph = FakeGraph
+        app_server.precompute_chunk_metadata = lambda chunks: chunks
         FakeGraph.stored = {}
         FakeGraph.summaries = {}
         chunk_store.clear_all_document_chunks()
@@ -170,6 +175,7 @@ class AppSmokeTests(unittest.TestCase):
         query_engine.Neo4jGraph = self.original_graph_query
         app_server.extract_text_from_pdf = self.original_extract_text
         app_server.extract_triples_groq = self.original_extract_triples
+        app_server.precompute_chunk_metadata = self.original_precompute_metadata
         app_server.set_active_document = self.original_set_active_document
         app_server.get_active_document = self.original_get_active_document
         chunk_store.clear_all_document_chunks()
@@ -269,6 +275,22 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(ask.status_code, 200)
         self.assertIn("good Constitution", ask.json()["answer"])
         self.assertIn("basic structure", ask.json()["answer"])
+
+    def test_hybrid_chunk_results_include_embedding_score_and_source_id(self):
+        app_server.extract_text_from_pdf = lambda _: (
+            "The legislature, the executive, and the judiciary are the three organs of government. "
+            "Each organ exercises different powers."
+        )
+        app_server.extract_triples_groq = lambda chunk: [
+            {"subject": "Government", "relation": "INCLUDES", "object": "Legislature"},
+        ]
+        self.client.post("/upload_pdf", files={"file": ("government.pdf", b"%PDF", "application/pdf")})
+        ask = self.client.post("/ask", json={"question": "what are the three organs of government"})
+        self.assertEqual(ask.status_code, 200)
+        chunk_results = [row for row in ask.json()["results"] if "score_breakdown" in row]
+        self.assertTrue(chunk_results)
+        self.assertTrue(chunk_results[0]["chunk_id"])
+        self.assertIn("embedding", chunk_results[0]["score_breakdown"])
 
     def test_current_document_scope_prevents_cross_document_leakage(self):
         app_server.extract_text_from_pdf = lambda _: "Karnataka has capital Bengaluru."
@@ -541,6 +563,38 @@ class AppSmokeTests(unittest.TestCase):
         self.assertTrue(chunks)
         self.assertTrue(all(chunk.strip().endswith((".", "!", "?")) for chunk in chunks))
         self.assertTrue(any("These are the legislature" in chunk for chunk in chunks))
+
+    def test_hybrid_chunks_include_metadata_and_sentence_safe_text(self):
+        pages = [
+            {
+                "page": 2,
+                "text": (
+                    "Introduction\n"
+                    "The hospital queue system manages patient flow. "
+                    "It reduces waiting time and improves service quality.\n\n"
+                    "Implementation\n"
+                    "The queue uses tokens and priority rules. "
+                    "The staff dashboard tracks every patient request."
+                ),
+            }
+        ]
+        chunks = utils.build_hybrid_chunks(
+            pages,
+            target_words=10,
+            min_words=5,
+            max_words=18,
+            overlap_ratio=0.20,
+        )
+        self.assertTrue(chunks)
+        first = chunks[0]
+        self.assertEqual(first["id"], "chunk_1")
+        self.assertIn("text", first)
+        self.assertIn("summary", first)
+        self.assertIn("keywords", first)
+        self.assertIn("section", first)
+        self.assertEqual(first["page"], 2)
+        self.assertTrue(first["text"].endswith((".", "!", "?")))
+        self.assertTrue(first["keywords"])
 
     def test_context_extraction_links_followup_list_sentence(self):
         triples = extractor._extract_interlinked_context_triples(
