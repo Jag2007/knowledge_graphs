@@ -151,16 +151,16 @@ class FakeGraph:
 
 class AppSmokeTests(unittest.TestCase):
     def setUp(self):
-        self.original_graph_app = app_server.Neo4jGraph
-        self.original_graph_query = query_engine.Neo4jGraph
+        self.original_graph_app = app_server.GraphStore
+        self.original_graph_query = query_engine.GraphStore
         self.original_extract_text = app_server.extract_text_from_pdf
         self.original_extract_triples = app_server.extract_triples_groq
         self.original_precompute_metadata = app_server.precompute_chunk_metadata
         self.original_set_active_document = app_server.set_active_document
         self.original_get_active_document = app_server.get_active_document
 
-        app_server.Neo4jGraph = FakeGraph
-        query_engine.Neo4jGraph = FakeGraph
+        app_server.GraphStore = FakeGraph
+        query_engine.GraphStore = FakeGraph
         app_server.precompute_chunk_metadata = lambda chunks: chunks
         FakeGraph.stored = {}
         FakeGraph.summaries = {}
@@ -171,8 +171,8 @@ class AppSmokeTests(unittest.TestCase):
         self.client = TestClient(app.app)
 
     def tearDown(self):
-        app_server.Neo4jGraph = self.original_graph_app
-        query_engine.Neo4jGraph = self.original_graph_query
+        app_server.GraphStore = self.original_graph_app
+        query_engine.GraphStore = self.original_graph_query
         app_server.extract_text_from_pdf = self.original_extract_text
         app_server.extract_triples_groq = self.original_extract_triples
         app_server.precompute_chunk_metadata = self.original_precompute_metadata

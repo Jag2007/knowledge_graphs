@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from kg_app.core.utils import extract_text_from_pdf, extract_pdf_pages, build_hybrid_chunks
 from kg_app.core.extractor import extract_triples_groq, precompute_chunk_metadata
-from kg_app.db.graph import Neo4jGraph
+from kg_app.db.graph import GraphStore
 from kg_app.core.query_engine import ask_question
 from kg_app.state.document_store import set_active_document, get_active_document
 from kg_app.state.chunk_store import save_document_chunks
@@ -64,7 +64,7 @@ async def index():
 
 @app.post("/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...)):
-    """Upload a PDF, extract knowledge triples, and save to Neo4j."""
+    """Upload a PDF, extract knowledge triples, and save to MongoDB."""
     graph = None
     try:
         if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -109,7 +109,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         chunks = precompute_chunk_metadata(chunks)
         chunk_texts = [chunk["text"] for chunk in chunks]
         
-        graph = Neo4jGraph()
+        graph = GraphStore()
         document_id = str(uuid.uuid4())
         extracted_triples_debug = []
         all_triples = []

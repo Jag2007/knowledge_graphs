@@ -1,12 +1,12 @@
 # Knowledge Graph Studio
 
-A FastAPI app that converts PDFs into a Neo4j knowledge graph and answers questions using graph retrieval plus chunk-based semantic retrieval.
+A FastAPI app that converts PDFs into a MongoDB-backed knowledge graph and answers questions using graph retrieval plus chunk-based semantic retrieval.
 
 ## Tech Stack
 
 - Python
 - FastAPI
-- Neo4j
+- MongoDB Atlas with `pymongo`
 - Groq API
 - PyMuPDF
 - sentence-transformers
@@ -17,16 +17,20 @@ A FastAPI app that converts PDFs into a Neo4j knowledge graph and answers questi
 ```text
 Knowledge Graphs/
 ├── app.py
-├── extractor.py
-├── graph.py
-├── query_engine.py
-├── utils.py
-├── document_store.py
 ├── kg_app/
 │   ├── api/
+│   │   └── server.py
 │   ├── core/
+│   │   ├── embeddings.py
+│   │   ├── extractor.py
+│   │   ├── query_engine.py
+│   │   └── utils.py
 │   ├── db/
+│   │   ├── graph.py
+│   │   └── mongo.py
 │   └── state/
+│       ├── chunk_store.py
+│       └── document_store.py
 ├── static/
 ├── tests/
 ├── requirements.txt
@@ -34,25 +38,20 @@ Knowledge Graphs/
 └── .gitignore
 ```
 
-The root files are lightweight compatibility wrappers, so this still works:
-
-```bash
-uvicorn app:app --reload
-```
+`app.py` stays at the root as the `uvicorn` entry point.
 
 ## Main Features
 
 - Upload a PDF and build a document-scoped knowledge graph
 - Extract triples using Groq
-- Store graph data in Neo4j
+- Store graph data in MongoDB
 - Store chunks locally for semantic retrieval
 - Ask natural-language questions about the active uploaded PDF
-- Use graph lookup, semantic chunk lookup, and multi-hop fallback
-- View clean answers in the UI and inspect JSON when needed
+- Combine graph lookup, semantic chunk lookup, and multi-hop fallback
 
 ## Setup
 
-### 1. Create a virtual environment
+### 1. Create and activate a virtual environment
 
 ```bash
 python3 -m venv .venv
@@ -69,9 +68,8 @@ pip install -r requirements.txt
 
 ```env
 GROQ_API_KEY=your_groq_api_key
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=your_neo4j_password
+MONGO_URI=your_mongodb_connection_string
+DB_NAME=knowledge_graph
 ```
 
 ## Run
@@ -90,10 +88,10 @@ Open:
 ### Upload flow
 
 - extract text from the PDF
-- split it into chunks
+- split it into hybrid chunks
 - generate triples from chunks
 - clean and deduplicate triples
-- store the graph in Neo4j
+- store graph data in MongoDB
 - store chunk metadata locally
 - mark the uploaded PDF as the active document
 
@@ -107,24 +105,11 @@ Open:
 
 ## Tests
 
-Run the smoke tests with:
-
 ```bash
 python -m unittest tests/test_smoke.py
 ```
 
-## Important Files
-
-- [app.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/app.py)
-- [kg_app/api/server.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/api/server.py)
-- [kg_app/core/extractor.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/core/extractor.py)
-- [kg_app/core/query_engine.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/core/query_engine.py)
-- [kg_app/core/utils.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/core/utils.py)
-- [kg_app/db/graph.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/db/graph.py)
-- [kg_app/state/chunk_store.py](/Users/jagruthipulumati/Desktop/Knowledge%20Graphs/kg_app/state/chunk_store.py)
-
 ## Notes
 
-- Use Neo4j Aura or local Neo4j.
-- Re-upload a PDF after major extraction or retrieval changes so the graph is rebuilt with the latest logic.
-- Large PDFs will take longer because triple extraction depends on LLM calls.
+- Re-upload a PDF after major extraction or retrieval changes so the stored graph is rebuilt with the latest logic.
+- Large PDFs will still take longer because triple extraction depends on LLM calls.

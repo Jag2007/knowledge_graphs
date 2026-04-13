@@ -1,7 +1,7 @@
 import re
 from difflib import SequenceMatcher
 
-from kg_app.db.graph import Neo4jGraph
+from kg_app.db.graph import GraphStore
 from kg_app.core.embeddings import cosine_similarity, embed_text
 from kg_app.core.utils import split_into_sentences
 from kg_app.state.chunk_store import get_document_chunks
@@ -1313,7 +1313,7 @@ def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], te
 
 def ask_question(question: str, document_id: str) -> dict:
     """Graph-first question answering scoped to the active uploaded document."""
-    graph = Neo4jGraph()
+    graph = GraphStore()
     try:
         total_triples = graph.count_triples(document_id)
         terms = _extract_terms(question)

@@ -389,7 +389,7 @@ def recover_json_objects(text: str) -> list[dict]:
 
 
 def normalise_relation_for_llm(relation: str) -> str:
-    """Normalize relation to UPPERCASE_WITH_UNDERSCORES without Neo4j-specific constraints."""
+    """Normalize relation to UPPERCASE_WITH_UNDERSCORES for extraction and storage."""
     rel = str(relation or "").strip().upper()
     rel = rel.replace(" ", "_").replace("-", "_")
     rel = re.sub(r"[^A-Z0-9_]", "", rel)
@@ -397,25 +397,24 @@ def normalise_relation_for_llm(relation: str) -> str:
     return rel
 
 
-def normalise_relation_for_neo4j(rel_type: str) -> str:
+def normalise_relation_for_storage(rel_type: str) -> str:
     """
-    Neo4j relationship type must be a valid token.
-    This function guarantees a safe uppercase underscore format and prefixes if needed.
+    Normalize relation labels into a stable uppercase token for storage and retrieval.
     """
     rel = normalise_relation_for_llm(rel_type)
     if not rel:
         return "RELATED"
-    # Relationship type cannot start with a digit.
     if re.match(r"^[0-9]", rel):
         rel = f"R_{rel}"
-    # Keep it reasonably short.
     return rel[:60]
 
 
 def load_env() -> None:
     """Backwards-compatible helper for older modules."""
     from dotenv import load_dotenv
-    load_dotenv()
+    from pathlib import Path
+
+    load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=True)
 
 
 def normalise_cypher_response(text: str) -> str:

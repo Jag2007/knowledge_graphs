@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import threading
 import time
@@ -15,7 +16,8 @@ from kg_app.core.utils import (
     split_into_sentences,
 )
 
-load_dotenv()
+ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 NOISY_RELATIONS = {
     "IS",
