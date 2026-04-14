@@ -627,6 +627,51 @@ class AppSmokeTests(unittest.TestCase):
             cleaned,
         )
 
+    def test_extractor_filters_noisy_relations_fragments_and_placeholder_objects(self):
+        cleaned = extractor.clean_and_validate_triples(
+            [
+                {"subject": "India", "relation": "RELATED_TO", "object": "Pakistan"},
+                {"subject": "A", "relation": "INCLUDES", "object": "B"},
+                {"subject": "India", "relation": "HAS", "object": "various"},
+                {
+                    "subject": "various minority communities also expressed the need for the Constitution to",
+                    "relation": "INCLUDES",
+                    "object": "rights that would protect their groups",
+                },
+                {"subject": "India", "relation": "CAPITAL_OF", "object": "Asia"},
+            ]
+        )
+        self.assertEqual(
+            cleaned,
+            [{"subject": "India", "relation": "CAPITAL_OF", "object": "Asia"}],
+        )
+
+    def test_extractor_trailing_article_regex_does_not_drop_valid_names_ending_in_a(self):
+        cleaned = extractor.clean_and_validate_triples(
+            [{"subject": "India", "relation": "INCLUDES", "object": "Africa"}]
+        )
+        self.assertEqual(
+            cleaned,
+            [{"subject": "India", "relation": "INCLUDES", "object": "Africa"}],
+        )
+
+    def test_relation_storage_canonicalizes_common_variants(self):
+        self.assertEqual(utils.normalise_relation_for_storage("was founded by"), "FOUNDED_BY")
+        self.assertEqual(utils.normalise_relation_for_storage("contains"), "INCLUDES")
+        self.assertEqual(utils.normalise_relation_for_storage("works for"), "EMPLOYED_BY")
+
+    def test_clean_entity_text_preserves_long_single_word_acronyms(self):
+        self.assertEqual(query_engine._clean_entity_text("UNESCO"), "UNESCO")
+        self.assertEqual(query_engine._clean_entity_text("UNITED STATES"), "United States")
+
+    def test_relation_hint_extractor_skips_capitalized_topic_phrase_words(self):
+        hints = query_engine._extract_relation_hints("Separation of Powers")
+        self.assertEqual(hints, set())
+
+    def test_relation_hint_extractor_keeps_relation_nouns_after_articles_when_whitelisted(self):
+        hints = query_engine._extract_relation_hints("what is the capital of Karnataka")
+        self.assertIn("HAS_CAPITAL", hints)
+
     def test_context_extraction_keeps_adjective_qualified_entity_and_pronoun_followup(self):
         triples = extractor._extract_interlinked_context_triples(
             "A good Constitution does not allow these whims to change its basic structure. "

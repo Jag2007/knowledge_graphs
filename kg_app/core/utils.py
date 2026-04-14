@@ -397,6 +397,47 @@ def normalise_relation_for_llm(relation: str) -> str:
     return rel
 
 
+_RELATION_CANON = {
+    "WAS_FOUNDED_BY": "FOUNDED_BY",
+    "IS_FOUNDED_BY": "FOUNDED_BY",
+    "WAS_FOUNDED": "FOUNDED",
+    "IS_FOUNDED": "FOUNDED",
+    "CONSISTS_OF": "INCLUDES",
+    "COMPRISED_OF": "INCLUDES",
+    "COMPOSED_OF": "INCLUDES",
+    "CONTAINS": "INCLUDES",
+    "CONTAIN": "INCLUDES",
+    "ALSO_KNOWN_AS": "KNOWN_AS",
+    "IS_KNOWN_AS": "KNOWN_AS",
+    "IS_ALSO_KNOWN_AS": "KNOWN_AS",
+    "WORKS_FOR": "EMPLOYED_BY",
+    "WORK_FOR": "EMPLOYED_BY",
+    "IS_EMPLOYED_BY": "EMPLOYED_BY",
+    "WAS_EMPLOYED_BY": "EMPLOYED_BY",
+    "IS_LOCATED_IN": "LOCATED_IN",
+    "WAS_LOCATED_IN": "LOCATED_IN",
+    "IS_BASED_IN": "BASED_IN",
+    "WAS_BASED_IN": "BASED_IN",
+    "WAS_ADOPTED_ON": "ADOPTED_ON",
+    "IS_ADOPTED_ON": "ADOPTED_ON",
+    "WAS_DRAFTED_BY": "DRAFTED_BY",
+    "IS_DRAFTED_BY": "DRAFTED_BY",
+    "IS_PART_OF": "PART_OF",
+    "WAS_PART_OF": "PART_OF",
+    "IS_MEMBER_OF": "MEMBER_OF",
+    "WAS_MEMBER_OF": "MEMBER_OF",
+    "IS_CAPITAL_OF": "CAPITAL_OF",
+    "HAS_CAPITAL_CITY": "HAS_CAPITAL",
+    "CAPITAL_CITY_OF": "CAPITAL_OF",
+    "WAS_BORN_IN": "BORN_IN",
+    "IS_BORN_IN": "BORN_IN",
+    "DIED_IN": "DIED_IN",
+    "WAS_DIED_IN": "DIED_IN",
+    "IS_KNOWN_FOR": "KNOWN_FOR",
+    "WAS_KNOWN_FOR": "KNOWN_FOR",
+}
+
+
 def normalise_relation_for_storage(rel_type: str) -> str:
     """
     Normalize relation labels into a stable uppercase token for storage and retrieval.
@@ -406,6 +447,7 @@ def normalise_relation_for_storage(rel_type: str) -> str:
         return "RELATED"
     if re.match(r"^[0-9]", rel):
         rel = f"R_{rel}"
+    rel = _RELATION_CANON.get(rel, rel)
     return rel[:60]
 
 

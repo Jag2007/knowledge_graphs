@@ -37,6 +37,19 @@ NOISY_RELATIONS = {
     "POPULAR",
     "FAMOUS",
     "KNOWN_FOR",
+    "RELATED_TO",
+    "ASSOCIATED_WITH",
+    "PLAYS",
+    "PLAYS_ROLE",
+    "CONSIDERED",
+    "DESCRIBED_AS",
+    "CAN_BE",
+    "MAY_BE",
+    "EXISTS",
+    "INVOLVED_IN",
+    "PART_OF_A",
+    "SEEN_AS",
+    "LINKED_TO",
 }
 
 INVALID_OBJECTS = {
@@ -51,6 +64,22 @@ INVALID_OBJECTS = {
     "unknown",
     "none",
     "null",
+    "various",
+    "many",
+    "several",
+    "things",
+    "stuff",
+    "examples",
+    "type",
+    "types",
+    "something",
+    "anything",
+    "everything",
+    "others",
+    "other",
+    "more",
+    "much",
+    "some",
 }
 
 INVALID_SUBJECTS = {
@@ -70,7 +99,8 @@ INVALID_SUBJECTS = {
 _EXTRACTION_CACHE: dict[str, list[dict]] = {}
 _REQUEST_LOCK = threading.Lock()
 _LAST_REQUEST_AT = 0.0
-DEBUG_LLM_OUTPUT = os.environ.get("KG_DEBUG_LLM_OUTPUT", "1").strip().lower() in {"1", "true", "yes"}
+DEBUG_LLM_OUTPUT = os.environ.get("KG_DEBUG_LLM_OUTPUT", "0").strip().lower() in {"1", "true", "yes"}
+_TRAILING_ARTICLES = re.compile(r"\b(its|their|his|her|the|an|a)\s*$", re.IGNORECASE)
 
 
 def _get_client() -> Groq:
@@ -96,7 +126,7 @@ def _call_groq_with_retry(client: Groq, *, model: str, prompt: str):
 
     max_retries = max(1, int(os.environ.get("GROQ_MAX_RETRIES", "4")))
     min_interval = max(0.0, float(os.environ.get("GROQ_MIN_INTERVAL_SECONDS", "1.5")))
-    max_tokens = max(128, int(os.environ.get("GROQ_MAX_OUTPUT_TOKENS", "400")))
+    max_tokens = max(128, int(os.environ.get("GROQ_MAX_OUTPUT_TOKENS", "1024")))
 
     last_error = None
     for attempt in range(max_retries):
@@ -205,6 +235,10 @@ def _split_compound_entity(value: str) -> list[str]:
     text = re.sub(r"\s+", " ", str(value or "").strip())
     if not text:
         return []
+
+    # Keep short phrases intact; they are often proper nouns rather than lists.
+    if len(text.split()) <= 3:
+        return [text]
 
     if not re.search(r",|\band\b|\bor\b", text, flags=re.IGNORECASE):
         return [text]
@@ -399,20 +433,27 @@ def clean_and_validate_triples(triples: list) -> list:
         if obj.strip().lower() in INVALID_OBJECTS:
             continue
 
-        if len(obj.split()) > 14:
+        if len(obj.split()) > 10:
             continue
 
-        if obj.strip().lower().endswith(("its", "their", "his", "her", "the", "a", "an")):
+        if len(subj.split()) > 8:
+            continue
+
+        if _TRAILING_ARTICLES.search(obj.strip()):
             continue
             
         for subject_part in _split_compound_entity(subj):
             subject_clean = _clean_context_phrase(subject_part)
             if not subject_clean or subject_clean.lower() in INVALID_SUBJECTS:
                 continue
+            if len(subject_clean) < 2:
+                continue
 
             for object_part in _split_compound_entity(obj):
                 object_clean = _clean_context_phrase(object_part)
                 if not object_clean or object_clean.lower() in INVALID_OBJECTS:
+                    continue
+                if len(object_clean) < 2:
                     continue
 
                 key = (subject_clean.lower(), rel_clean.lower(), object_clean.lower())
@@ -441,7 +482,7 @@ def extract_triples_groq(chunk: str) -> list:
     if cache_key in _EXTRACTION_CACHE:
         return list(_EXTRACTION_CACHE[cache_key])
 
-    model = os.environ.get("GROQ_TRIPLE_MODEL", "llama-3.1-8b-instant")
+    model = os.environ.get("GROQ_TRIPLE_MODEL", "llama-3.3-70b-versatile")
     client = _get_client()
 
     def _attempt(prompt: str) -> tuple[list, str]:
@@ -482,8 +523,9 @@ Format:
 ]
 
 Rules:
-- Extract multiple factual triples when they are clearly stated.
-- Return at most 20 triples.
+- Extract every clearly stated factual triple.
+- Aim for 30 or more triples when the text supports it.
+- Do not stop early. Extract until you have covered every fact in the text.
 - Keep subject and object short and clean.
 - Relation must be 1-3 words.
 - Use UPPERCASE_WITH_UNDERSCORES.

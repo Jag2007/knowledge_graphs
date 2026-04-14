@@ -7,12 +7,12 @@ from kg_app.core.utils import split_into_sentences
 from kg_app.state.chunk_store import get_document_chunks
 
 HYBRID_WEIGHTS = {
-    "embedding": 0.5,
-    "keyword": 0.2,
+    "embedding": 0.45,
+    "keyword": 0.25,
     "fuzzy": 0.1,
     "graph": 0.2,
 }
-MIN_HYBRID_SCORE = 0.12
+MIN_HYBRID_SCORE = 0.18
 
 STOP_WORDS = {
     "a",
@@ -59,11 +59,18 @@ STOP_WORDS = {
 }
 
 QUESTION_SYNONYMS = {
-    "clothing": ["wear", "wears", "attire", "dress", "garment"],
-    "food": ["cuisine", "dish", "dishes", "meal"],
-    "festival": ["festivals", "celebrates", "celebration"],
-    "religion": ["spirituality", "belief", "beliefs"],
-    "culture": ["tradition", "traditions", "heritage"],
+    "founder": ["founded", "founded by", "established by", "created by"],
+    "location": ["located", "situated", "based", "found in", "position"],
+    "member": ["members", "membership", "part of", "belongs to"],
+    "leader": ["head", "chief", "director", "president", "chairman"],
+    "author": ["written by", "authored by", "wrote", "creator"],
+    "date": ["when", "year", "time", "period", "era"],
+    "cause": ["caused by", "reason", "why", "due to", "result of"],
+    "result": ["outcome", "effect", "consequence", "led to", "produced"],
+    "purpose": ["goal", "aim", "objective", "intended for", "designed for"],
+    "part": ["component", "element", "section", "portion", "division"],
+    "capital": ["capital city", "seat of government", "headquarters"],
+    "owner": ["owned by", "belongs to", "property of", "controlled by"],
 }
 
 GENERIC_NODE_PATTERNS = [
@@ -71,44 +78,67 @@ GENERIC_NODE_PATTERNS = [
     "tell me about",
     "what are",
     "who is",
+    "who was",
+    "what is",
+    "describe",
+    "explain",
+    "give me information about",
+    "give me details about",
+    "what can you tell me about",
+    "information about",
 ]
 
 RELATION_HINTS = {
-    "include": {"INCLUDES"},
-    "includes": {"INCLUDES"},
+    "include": {"INCLUDES"}, "includes": {"INCLUDES"},
+    "contain": {"INCLUDES"}, "contains": {"INCLUDES"},
+    "consist": {"INCLUDES"}, "consists": {"INCLUDES"},
+    "comprise": {"INCLUDES"}, "comprises": {"INCLUDES"},
     "capital": {"HAS_CAPITAL", "CAPITAL", "CAPITAL_OF"},
     "located": {"LOCATED_IN", "BASED_IN"},
+    "location": {"LOCATED_IN", "BASED_IN"},
     "based": {"LOCATED_IN", "BASED_IN"},
-    "celebrate": {"CELEBRATES"},
-    "celebrates": {"CELEBRATES"},
-    "wear": {"WEARS"},
-    "wears": {"WEARS"},
-    "practice": {"PRACTICES"},
-    "practices": {"PRACTICES"},
-    "found": {"FOUNDED", "FOUNDED_BY"},
-    "founded": {"FOUNDED", "FOUNDED_BY"},
-    "father": {"KNOWN_AS"},
-    "known": {"KNOWN_AS"},
-    "allow": {"DOES_NOT_ALLOW"},
-    "allows": {"DOES_NOT_ALLOW"},
-    "guarantee": {"GUARANTEES"},
-    "guarantees": {"GUARANTEES"},
-    "protect": {"PROTECTS"},
-    "protects": {"PROTECTS"},
-    "prohibit": {"PROHIBITS"},
-    "prohibits": {"PROHIBITS"},
-    "specify": {"SPECIFIES"},
-    "specifies": {"SPECIFIES"},
-    "mention": {"MENTIONS"},
-    "mentions": {"MENTIONS"},
-    "start": {"STARTED", "STARTED_IN", "STARTED_ON", "BEGAN", "BEGAN_IN", "BEGAN_ON", "FOUNDED", "CONVENED_IN"},
-    "started": {"STARTED", "STARTED_IN", "STARTED_ON", "BEGAN", "BEGAN_IN", "BEGAN_ON", "FOUNDED", "CONVENED_IN"},
-    "begin": {"STARTED", "STARTED_IN", "STARTED_ON", "BEGAN", "BEGAN_IN", "BEGAN_ON", "FOUNDED", "CONVENED_IN"},
-    "began": {"STARTED", "STARTED_IN", "STARTED_ON", "BEGAN", "BEGAN_IN", "BEGAN_ON", "FOUNDED", "CONVENED_IN"},
-    "separation": {"SEPARATED_FROM", "SEPARATED_INTO", "PARTITIONED", "PARTITIONED_FROM", "DIVIDED_INTO"},
-    "partition": {"SEPARATED_FROM", "SEPARATED_INTO", "PARTITIONED", "PARTITIONED_FROM", "DIVIDED_INTO"},
-    "separate": {"SEPARATED_FROM", "SEPARATED_INTO", "PARTITIONED", "PARTITIONED_FROM", "DIVIDED_INTO"},
-    "divided": {"SEPARATED_FROM", "SEPARATED_INTO", "PARTITIONED", "PARTITIONED_FROM", "DIVIDED_INTO"},
+    "situated": {"LOCATED_IN"},
+    "position": {"LOCATED_IN"},
+    "headquartered": {"BASED_IN"},
+    "found": {"FOUNDED", "FOUNDED_BY"}, "founded": {"FOUNDED", "FOUNDED_BY"},
+    "create": {"FOUNDED", "FOUNDED_BY"}, "created": {"FOUNDED", "FOUNDED_BY"},
+    "establish": {"FOUNDED", "FOUNDED_BY"}, "established": {"FOUNDED", "FOUNDED_BY"},
+    "invent": {"INVENTED_BY"}, "invented": {"INVENTED_BY"},
+    "discover": {"DISCOVERED_BY"}, "discovered": {"DISCOVERED_BY"},
+    "write": {"WRITTEN_BY"}, "wrote": {"WRITTEN_BY"}, "written": {"WRITTEN_BY"},
+    "author": {"WRITTEN_BY", "AUTHORED_BY"}, "authored": {"WRITTEN_BY", "AUTHORED_BY"},
+    "publish": {"PUBLISHED_IN", "PUBLISHED_BY"}, "published": {"PUBLISHED_IN", "PUBLISHED_BY"},
+    "start": {"STARTED", "STARTED_IN", "STARTED_ON", "BEGAN", "FOUNDED", "CONVENED_IN"},
+    "started": {"STARTED", "STARTED_IN", "STARTED_ON", "BEGAN", "FOUNDED", "CONVENED_IN"},
+    "begin": {"STARTED", "BEGAN", "BEGAN_IN"}, "began": {"STARTED", "BEGAN", "BEGAN_IN"},
+    "born": {"BORN_IN"}, "birth": {"BORN_IN"},
+    "die": {"DIED_IN"}, "died": {"DIED_IN"}, "death": {"DIED_IN"},
+    "father": {"KNOWN_AS", "FOUNDED_BY"}, "known": {"KNOWN_AS"},
+    "called": {"KNOWN_AS"}, "named": {"KNOWN_AS"},
+    "member": {"MEMBER_OF"}, "part": {"PART_OF"},
+    "leader": {"LED_BY", "HEADED_BY"}, "head": {"LED_BY", "HEADED_BY"},
+    "employ": {"EMPLOYED_BY"}, "employed": {"EMPLOYED_BY"},
+    "work": {"EMPLOYED_BY"}, "works": {"EMPLOYED_BY"},
+    "allow": {"DOES_NOT_ALLOW"}, "allows": {"DOES_NOT_ALLOW"},
+    "guarantee": {"GUARANTEES"}, "guarantees": {"GUARANTEES"},
+    "protect": {"PROTECTS"}, "protects": {"PROTECTS"},
+    "prohibit": {"PROHIBITS"}, "prohibits": {"PROHIBITS"},
+    "specify": {"SPECIFIES"}, "specifies": {"SPECIFIES"},
+    "adopt": {"ADOPTED"}, "adopted": {"ADOPTED"},
+    "draft": {"DRAFTED"}, "drafted": {"DRAFTED"},
+    "separation": {"SEPARATED_FROM", "DIVIDED_INTO", "PARTITIONED"},
+    "partition": {"PARTITIONED", "DIVIDED_INTO"},
+    "separate": {"SEPARATED_FROM", "DIVIDED_INTO"},
+    "divided": {"SEPARATED_FROM", "DIVIDED_INTO"},
+    "split": {"DIVIDED_INTO"},
+    "cause": {"CAUSED_BY"}, "caused": {"CAUSED_BY"},
+    "lead": {"LED_TO"}, "leads": {"LED_TO"}, "led": {"LED_TO"},
+    "result": {"RESULTED_IN"}, "results": {"RESULTED_IN"},
+    "treat": {"TREATS"}, "treats": {"TREATS"}, "used": {"USED_FOR"},
+    "use": {"USED_FOR"}, "apply": {"APPLIED_TO"},
+    "mention": {"MENTIONS"}, "mentions": {"MENTIONS"},
+    "describe": {"DESCRIBES"}, "describes": {"DESCRIBES"},
+    "represent": {"REPRESENTS"}, "represents": {"REPRESENTS"},
 }
 
 SUMMARY_RELATION_ORDER = [
@@ -122,6 +152,10 @@ SUMMARY_RELATION_ORDER = [
 ]
 
 MAX_ENTITY_NAME_WORDS = 8
+_MULTI_HOP_REGEX = re.compile(
+    r"the\s+\w+\s+that\s+\w+|the\s+\w+\s+of\s+the\s+\w+",
+    re.IGNORECASE,
+)
 
 
 def _relation_to_text(relation: str) -> str:
@@ -161,6 +195,27 @@ def _verb_from_relation(relation: str) -> str:
         "MENTIONS": "mentions",
         "REPRESENTS": "represents",
         "KNOWN_FOR": "is known for",
+        "CONDUCTED_BY": "was conducted by",
+        "PUBLISHED_IN": "was published in",
+        "PUBLISHED_BY": "was published by",
+        "TREATS": "treats",
+        "CARRIES": "carries",
+        "STORES": "stores",
+        "BORN_IN": "was born in",
+        "DIED_IN": "died in",
+        "INVENTED_BY": "was invented by",
+        "DISCOVERED_BY": "was discovered by",
+        "AUTHORED_BY": "was authored by",
+        "WRITTEN_BY": "was written by",
+        "LED_BY": "is led by",
+        "HEADED_BY": "is headed by",
+        "LED_TO": "led to",
+        "RESULTED_IN": "resulted in",
+        "CAUSED_BY": "was caused by",
+        "USED_FOR": "is used for",
+        "APPLIED_TO": "is applied to",
+        "PART_OF": "is part of",
+        "MEMBER_OF": "is a member of",
     }
     if relation_upper in mapping:
         return mapping[relation_upper]
@@ -169,11 +224,21 @@ def _verb_from_relation(relation: str) -> str:
 
 def _adjust_verb_for_subject(subject: str, verb: str) -> str:
     lowered_subject = subject.strip().lower()
-    if lowered_subject.endswith("s") and verb.endswith("s"):
+    last_word = lowered_subject.split()[-1] if lowered_subject.split() else lowered_subject
+    if last_word.endswith("s") and not last_word.endswith(("ics", "ss", "us")) and verb.endswith("s"):
+        irregular = {
+            "is": "are",
+            "has": "have",
+            "does": "do",
+        }
+        if verb in irregular:
+            return irregular[verb]
         if verb.endswith("ies"):
             return verb[:-3] + "y"
-        if verb.endswith("es"):
+        if verb.endswith(("ches", "shes", "xes", "zes", "sses", "oes")):
             return verb[:-2]
+        if verb.endswith("es"):
+            return verb[:-1]
         return verb[:-1]
     return verb
 
@@ -184,7 +249,7 @@ def _clean_entity_text(value: str) -> str:
     if not text:
         return ""
     if text.isupper():
-        if len(text) <= 4:
+        if " " not in text:
             return text
         return text.title()
     return text
@@ -240,12 +305,14 @@ def _entity_name_quality(name: str) -> int:
     if not tokens:
         return -100
     score = 0
-    if len(tokens) <= 4:
+    if len(tokens) <= 2:
+        score += 6
+    elif len(tokens) <= 4:
         score += 4
-    elif len(tokens) > MAX_ENTITY_NAME_WORDS:
-        score -= 8
-    if any(token in {"constitution", "assembly", "government", "parliamentary", "culture", "tradition"} for token in tokens):
-        score += 2
+    elif len(tokens) <= 6:
+        score += 0
+    else:
+        score -= (len(tokens) - 6) * 4
     if any(len(token) > 16 for token in tokens):
         score -= 2
     return score
@@ -420,7 +487,24 @@ def _expand_terms(terms: list[str]) -> list[str]:
 
 def _extract_relation_hints(question: str) -> set[str]:
     hints: set[str] = set()
+    capitalized_spans: set[str] = set()
+    for match in re.finditer(r"\b([A-Z][a-zA-Z]+(?:\s+(?:[a-z]{1,4}|[A-Z][a-zA-Z]+))+)\b", question):
+        for word in match.group(0).split():
+            if word[:1].isupper():
+                capitalized_spans.add(word.lower())
+
+    article_preceded: set[str] = set()
+    for match in re.finditer(r"\b(?:the|a|an|this|that)\s+([a-zA-Z]+)\b", question, re.IGNORECASE):
+        word = match.group(1).lower()
+        always_relation = {"capital", "founder", "father", "member", "leader", "author", "owner", "head"}
+        if word not in always_relation:
+            article_preceded.add(word)
+
     for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", question.lower()):
+        if token in capitalized_spans:
+            continue
+        if token in article_preceded:
+            continue
         hints.update(RELATION_HINTS.get(token, set()))
     return hints
 
@@ -428,7 +512,22 @@ def _extract_relation_hints(question: str) -> set[str]:
 def _extract_relation_groups(question: str) -> list[set[str]]:
     groups: list[set[str]] = []
     seen = set()
+    capitalized_spans: set[str] = set()
+    for match in re.finditer(r"\b([A-Z][a-zA-Z]+(?:\s+(?:[a-z]{1,4}|[A-Z][a-zA-Z]+))+)\b", question):
+        for word in match.group(0).split():
+            if word[:1].isupper():
+                capitalized_spans.add(word.lower())
+
+    article_preceded: set[str] = set()
+    always_relation = {"capital", "founder", "father", "member", "leader", "author", "owner", "head"}
+    for match in re.finditer(r"\b(?:the|a|an|this|that)\s+([a-zA-Z]+)\b", question, re.IGNORECASE):
+        word = match.group(1).lower()
+        if word not in always_relation:
+            article_preceded.add(word)
+
     for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", question.lower()):
+        if token in capitalized_spans or token in article_preceded:
+            continue
         relation_group = RELATION_HINTS.get(token)
         if not relation_group:
             continue
@@ -477,6 +576,8 @@ def _is_explicit_relation_question(question: str, relation_hints: set[str]) -> b
     text = question.strip().lower()
     if text.startswith(("what does ", "what did ", "when ", "where ", "who ", "which ")):
         return True
+    if re.match(r"what\s+(is|are)\s+the\s+", text):
+        return True
     if _is_node_overview_question(question):
         return False
     if _is_plain_entity_query(question) and not text.startswith(("what is the ", "what are the ", "where ", "when ", "who ")):
@@ -497,8 +598,44 @@ def _is_multi_hop_question(question: str, relation_groups: list[set[str]]) -> bo
         "located in",
         "connected to",
         "related to",
+        "who founded",
+        "who created",
+        "who invented",
+        "who discovered",
+        "who wrote",
+        "who authored",
+        "who led",
+        "who started",
+        "where is the",
+        "where was the",
+        "where did the",
+        "what country",
+        "which country",
+        "what city",
+        "which city",
+        "what year",
+        "which year",
+        "when did",
+        "when was",
+        "what caused",
+        "what led to",
+        "what resulted in",
+        "who is the leader",
+        "who is the head",
+        "who is the founder",
+        "capital of",
+        "headquarters of",
+        "founder of",
+        "member of",
+        "part of",
+        "author of",
+        "owner of",
     ]
-    return any(marker in text for marker in chain_markers)
+    if any(marker in text for marker in chain_markers):
+        return True
+    if _MULTI_HOP_REGEX.search(question):
+        return True
+    return False
 
 
 def _score_direct_row(row: dict, terms: list[str]) -> int:
@@ -715,9 +852,9 @@ def _format_overview(results: list[dict]) -> str:
             if item and key not in seen:
                 seen.add(key)
                 topics.append(item)
-            if len(topics) >= 6:
+            if len(topics) >= 10:
                 break
-        if len(topics) >= 6:
+        if len(topics) >= 10:
             break
 
     if not topics:
@@ -952,8 +1089,13 @@ def _format_chunk_answer(question: str, hits: list[dict], terms: list[str]) -> s
     if filtered:
         chosen_sentences = filtered
 
+    if question.strip().lower().startswith(("when ", "where ", "who ")):
+        chosen_sentences = chosen_sentences[:1]
+
     if len(chosen_sentences) == 1:
         sentence = chosen_sentences[0]
+        if question.strip().lower().startswith(("when ", "where ", "who ")):
+            sentence = re.sub(r"^The\s+(?=[A-Z])", "", sentence)
         return sentence if sentence.endswith((".", "!", "?")) else sentence + "."
     return "Based on the uploaded document: " + " ".join(
         sentence if sentence.endswith((".", "!", "?")) else sentence + "."
@@ -995,13 +1137,13 @@ def _prefer_chunk_answer(question: str, graph_answer: str, chunk_answer: str, te
     if _is_overview_question(question):
         return False
 
+    if relation_hints:
+        return graph_coverage < minimum_coverage and chunk_coverage >= minimum_coverage
+
     if chunk_coverage >= minimum_coverage and graph_coverage < minimum_coverage:
         return True
 
     if chunk_phrase_coverage > graph_phrase_coverage and chunk_coverage >= graph_coverage:
-        return True
-
-    if relation_hints and graph_coverage < minimum_coverage and chunk_coverage >= minimum_coverage:
         return True
 
     if len(graph_answer.split()) > 35 and graph_coverage == 0 and chunk_coverage > 0:
@@ -1298,7 +1440,7 @@ def _format_entity_neighborhood(question: str, anchor: str, rows: list[dict], te
             continue
         seen.add(key)
         facts.append(line)
-        if len(facts) >= 4:
+        if len(facts) >= 8:
             break
 
     if not facts:
