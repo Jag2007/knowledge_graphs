@@ -1,7 +1,11 @@
 import json
-import fitz  # PyMuPDF
 import re
 from collections import Counter
+
+try:
+    import fitz  # PyMuPDF
+except Exception:  # pragma: no cover - handled when PDF parsing is actually used
+    fitz = None
 
 
 KEYWORD_STOP_WORDS = {
@@ -47,6 +51,11 @@ KEYWORD_STOP_WORDS = {
 
 def extract_pdf_pages(file_bytes: bytes) -> list[dict]:
     """Extract page-aware PDF text so chunks can keep page metadata."""
+    if fitz is None:
+        raise RuntimeError(
+            "PyMuPDF is not installed in the current environment. "
+            "Install dependencies from requirements.txt before uploading PDFs."
+        )
     pages: list[dict] = []
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     for index, page in enumerate(doc, start=1):

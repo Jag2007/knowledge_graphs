@@ -241,6 +241,11 @@ class AppSmokeTests(unittest.TestCase):
                 "Chapter 4: MRS GREN .... Chapter 5: Fields of biology .... Chapter 6: Molecules of life"
             )
         )
+        self.assertTrue(
+            app_server._is_toc_like_text(
+                "Table of Contents Introduction 12 Neural Networks 45 Reinforcement Learning 325 Index 361"
+            )
+        )
         self.assertFalse(
             app_server._is_toc_like_text(
                 "Plants are living organisms that make food using sunlight, water, and carbon dioxide."
@@ -274,6 +279,21 @@ class AppSmokeTests(unittest.TestCase):
         answer = app_server._build_grounded_hebbrix_answer(results, question="what is plant")
         self.assertIn("A plant is a multicellular organism", answer)
         self.assertNotIn("Chapter 9", answer)
+
+    def test_hebbrix_grounded_answer_removes_pdf_heading_noise(self):
+        results = [
+            {
+                "text": (
+                    "325 Deep Reinforcement Learning Masters Atari Games 325 "
+                    "What Is Reinforcement Learning? Reinforcement learning is a type of machine learning "
+                    "in which an agent learns by interacting with an environment and receiving rewards."
+                )
+            }
+        ]
+        answer = app_server._build_grounded_hebbrix_answer(results, question="what is reinforcement learning")
+        self.assertIn("Reinforcement learning is a type of machine learning", answer)
+        self.assertNotIn("325 Deep Reinforcement Learning", answer)
+        self.assertNotIn("What Is Reinforcement Learning?", answer)
 
     def test_hebbrix_answers_are_limited_to_active_document_results(self):
         os.environ["HEBBRIX_NATIVE_MODE"] = "1"
@@ -342,6 +362,142 @@ class AppSmokeTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["answer"], "It is not in the uploaded document. Please check the text.")
         self.assertEqual(payload["results"], [])
+
+    def test_hebbrix_grounded_answer_beats_weaker_chat_answer(self):
+        os.environ["HEBBRIX_NATIVE_MODE"] = "1"
+        self._set_active_document("hebbrix:col-1:doc-1", "rl.pdf")
+        app_server._search_hebbrix = lambda question, collection_id, document_id="": {
+            "results": [
+                {
+                    "content": (
+                        "What Is Reinforcement Learning? Reinforcement learning is learning by interacting "
+                        "with an environment and receiving rewards."
+                    ),
+                    "metadata": {"document_id": "doc-1"},
+                }
+            ]
+        }
+        app_server._fetch_hebbrix_chunks = lambda document_id: [
+            {
+                "text": (
+                    "What Is Reinforcement Learning? Reinforcement learning is learning by interacting "
+                    "with an environment and receiving rewards."
+                )
+            }
+        ]
+        app_server._chat_hebbrix = lambda question, collection_id, document_id="", context_snippets=None: {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "For the rest of us, deep learning is still a pretty complex and difficult subject to grasp."
+                        )
+                    }
+                }
+            ]
+        }
+        app_server._query_hebbrix_graph = lambda question, collection_id: {"results": []}
+
+        response = self.client.post("/ask", json={"question": "what is reinforcement learning"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("Reinforcement learning is learning by interacting", payload["answer"])
+        self.assertNotIn("deep learning is still", payload["answer"])
+
+    def test_hebbrix_definition_questions_prefer_grounded_answer_over_chat_rewrite(self):
+        os.environ["HEBBRIX_NATIVE_MODE"] = "1"
+        self._set_active_document("hebbrix:col-1:doc-1", "rl.pdf")
+        app_server._search_hebbrix = lambda question, collection_id, document_id="": {
+            "results": [
+                {
+                    "content": (
+                        "What Is Reinforcement Learning? Reinforcement learning is learning by interacting "
+                        "with an environment and receiving rewards."
+                    ),
+                    "metadata": {"document_id": "doc-1"},
+                }
+            ]
+        }
+        app_server._fetch_hebbrix_chunks = lambda document_id: [
+            {
+                "text": (
+                    "What Is Reinforcement Learning? Reinforcement learning is learning by interacting "
+                    "with an environment and receiving rewards."
+                )
+            }
+        ]
+        app_server._chat_hebbrix = lambda question, collection_id, document_id="", context_snippets=None: {
+            "choices": [
+                {
+                    "message": {
+                        "content": "Learning 334 Pole-Cart with Policy Gradients 335 Table of Contents."
+                    }
+                }
+            ]
+        }
+        app_server._query_hebbrix_graph = lambda question, collection_id: {"results": []}
+
+        response = self.client.post("/ask", json={"question": "what is reinforcement learning"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("Reinforcement learning is learning by interacting", payload["answer"])
+        self.assertNotIn("Pole-Cart", payload["answer"])
+
+    def test_hebbrix_overview_questions_use_document_overview_path(self):
+        os.environ["HEBBRIX_NATIVE_MODE"] = "1"
+        self._set_active_document("hebbrix:col-1:doc-1", "dl.pdf")
+        app_server._fetch_hebbrix_chunks = lambda document_id: [
+            {
+                "text": (
+                    "Deep learning uses multilayer neural networks to learn from data. "
+                    "The book also covers convolutional networks and sequence models."
+                )
+            },
+            {
+                "text": (
+                    "Later chapters discuss generative models and reinforcement learning."
+                )
+            },
+        ]
+        app_server._chat_hebbrix = lambda question, collection_id, document_id="", context_snippets=None: {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "The PDF is about deep learning, including neural networks, convolutional networks, "
+                            "sequence models, generative models, and reinforcement learning."
+                        )
+                    }
+                }
+            ]
+        }
+
+        response = self.client.post("/ask", json={"question": "what is the pdf talking about"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["steps"], ["Hebbrix document overview"])
+        self.assertIn("deep learning", payload["answer"].lower())
+
+    def test_hebbrix_overview_context_prefers_content_over_front_matter(self):
+        chunks = [
+            {
+                "text": (
+                    "Prerequisites and Objectives This book is aimed at an audience with calculus and Python."
+                )
+            },
+            {
+                "text": (
+                    "The book covers deep learning topics including neural networks, convolutional networks, "
+                    "sequence models, and reinforcement learning."
+                )
+            },
+        ]
+        overview = app_server._build_hebbrix_overview_context(chunks, limit=2)
+        self.assertEqual(len(overview), 1)
+        self.assertIn("deep learning topics", overview[0].lower())
 
     def test_upload_and_ask_flow(self):
         app_server.extract_text_from_pdf = lambda _: "Mukesh Ambani chairs Reliance Industries. Reliance Industries is based in India."

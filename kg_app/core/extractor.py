@@ -7,7 +7,11 @@ import threading
 import time
 
 from dotenv import load_dotenv
-from openai import OpenAI
+
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover - handled at runtime when provider is used
+    OpenAI = None
 
 from kg_app.core.utils import (
     extract_first_json,
@@ -140,6 +144,11 @@ def _current_base_url() -> str:
 
 
 def _get_client():
+    if OpenAI is None:
+        raise RuntimeError(
+            "The 'openai' package is required for Hebbrix/OpenAI-compatible providers. "
+            "Install dependencies from requirements.txt."
+        )
     if os.environ.get("HEBBRIX_API_KEY"):
         config = ("hebbrix", _current_base_url() or "default")
         if config not in _LOGGED_PROVIDER_CONFIGS:

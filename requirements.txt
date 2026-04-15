@@ -9,3 +9,4 @@ sentence-transformers
 pymongo
 dnspython
 requests
+openai
