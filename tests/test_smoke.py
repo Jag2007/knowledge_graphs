@@ -151,10 +151,12 @@ class FakeGraph:
 
 class AppSmokeTests(unittest.TestCase):
     def setUp(self):
+        self.original_hebbrix_native_mode = os.environ.get("HEBBRIX_NATIVE_MODE")
+        os.environ["HEBBRIX_NATIVE_MODE"] = "0"
         self.original_graph_app = app_server.GraphStore
         self.original_graph_query = query_engine.GraphStore
         self.original_extract_text = app_server.extract_text_from_pdf
-        self.original_extract_triples = app_server.extract_triples_groq
+        self.original_extract_triples = app_server.extract_triples_llm
         self.original_precompute_metadata = app_server.precompute_chunk_metadata
         self.original_set_active_document = app_server.set_active_document
         self.original_get_active_document = app_server.get_active_document
@@ -171,10 +173,14 @@ class AppSmokeTests(unittest.TestCase):
         self.client = TestClient(app.app)
 
     def tearDown(self):
+        if self.original_hebbrix_native_mode is None:
+            os.environ.pop("HEBBRIX_NATIVE_MODE", None)
+        else:
+            os.environ["HEBBRIX_NATIVE_MODE"] = self.original_hebbrix_native_mode
         app_server.GraphStore = self.original_graph_app
         query_engine.GraphStore = self.original_graph_query
         app_server.extract_text_from_pdf = self.original_extract_text
-        app_server.extract_triples_groq = self.original_extract_triples
+        app_server.extract_triples_llm = self.original_extract_triples
         app_server.precompute_chunk_metadata = self.original_precompute_metadata
         app_server.set_active_document = self.original_set_active_document
         app_server.get_active_document = self.original_get_active_document
@@ -204,14 +210,26 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_handles_documents_with_no_triples(self):
         app_server.extract_text_from_pdf = lambda _: "Just plain text without useful relations."
-        app_server.extract_triples_groq = lambda chunk: []
+        app_server.extract_triples_llm = lambda chunk: []
         response = self.client.post("/upload_pdf", files={"file": ("plain.pdf", b"%PDF", "application/pdf")})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["error"], "No structured knowledge was extracted from the document.")
 
+    def test_hebbrix_helpers_support_nested_document_payloads(self):
+        payload = {
+            "message": "Document uploaded successfully and is being processed",
+            "document": {
+                "id": "doc-123",
+                "status": "searchable",
+                "collection_id": "col-456",
+            },
+        }
+        self.assertEqual(app_server._extract_hebbrix_id(payload, "id", "document_id"), "doc-123")
+        self.assertEqual(app_server._extract_hebbrix_document(payload)["status"], "searchable")
+
     def test_upload_and_ask_flow(self):
         app_server.extract_text_from_pdf = lambda _: "Mukesh Ambani chairs Reliance Industries. Reliance Industries is based in India."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Mukesh Ambani", "relation": "CHAIRMAN_OF", "object": "Reliance Industries"},
             {"subject": "Reliance Industries", "relation": "BASED_IN", "object": "India"},
         ]
@@ -230,7 +248,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_overview_question_returns_summary(self):
         app_server.extract_text_from_pdf = lambda _: "Indian culture includes festivals, cuisine, and dance."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Culture", "relation": "INCLUDES", "object": "Festivals"},
             {"subject": "Indian Culture", "relation": "INCLUDES", "object": "Cuisine"},
             {"subject": "Indian Culture", "relation": "INCLUDES", "object": "Dance"},
@@ -242,7 +260,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_overview_question_accepts_talking_about_variant(self):
         app_server.extract_text_from_pdf = lambda _: "The Indian Constitution discusses fundamental rights and duties."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Constitution", "relation": "INCLUDES", "object": "Fundamental Rights"},
             {"subject": "Indian Constitution", "relation": "INCLUDES", "object": "Fundamental Duties"},
         ]
@@ -254,7 +272,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_semantic_retrieval_matches_relation_text(self):
         app_server.extract_text_from_pdf = lambda _: "Indian culture includes festivals."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Culture", "relation": "INCLUDES", "object": "Festivals"},
         ]
         self.client.post("/upload_pdf", files={"file": ("sample.pdf", b"%PDF", "application/pdf")})
@@ -267,7 +285,7 @@ class AppSmokeTests(unittest.TestCase):
             "A good Constitution does not allow whims to change its basic structure. "
             "It does not allow easy overthrow of provisions that guarantee rights of citizens."
         )
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Constitution", "relation": "INCLUDES", "object": "Rights"},
         ]
         self.client.post("/upload_pdf", files={"file": ("constitution.pdf", b"%PDF", "application/pdf")})
@@ -281,7 +299,7 @@ class AppSmokeTests(unittest.TestCase):
             "The legislature, the executive, and the judiciary are the three organs of government. "
             "Each organ exercises different powers."
         )
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Government", "relation": "INCLUDES", "object": "Legislature"},
         ]
         self.client.post("/upload_pdf", files={"file": ("government.pdf", b"%PDF", "application/pdf")})
@@ -294,14 +312,14 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_current_document_scope_prevents_cross_document_leakage(self):
         app_server.extract_text_from_pdf = lambda _: "Karnataka has capital Bengaluru."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Karnataka", "relation": "HAS_CAPITAL", "object": "Bengaluru"},
         ]
         first_upload = self.client.post("/upload_pdf", files={"file": ("karnataka.pdf", b"%PDF", "application/pdf")})
         self.assertEqual(first_upload.status_code, 200)
 
         app_server.extract_text_from_pdf = lambda _: "Indian culture includes festivals and cuisine."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Culture", "relation": "INCLUDES", "object": "Festivals"},
             {"subject": "Indian Culture", "relation": "INCLUDES", "object": "Cuisine"},
         ]
@@ -315,7 +333,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_capital_question_gets_natural_answer(self):
         app_server.extract_text_from_pdf = lambda _: "Karnataka has capital Bengaluru."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Karnataka", "relation": "HAS_CAPITAL", "object": "Bengaluru"},
         ]
         self.client.post("/upload_pdf", files={"file": ("karnataka.pdf", b"%PDF", "application/pdf")})
@@ -325,7 +343,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_node_overview_uses_anchor_entity_context(self):
         app_server.extract_text_from_pdf = lambda _: "Indian tradition includes spirituality, hospitality, and family values."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Tradition", "relation": "INCLUDES", "object": "Spirituality"},
             {"subject": "Indian Tradition", "relation": "INCLUDES", "object": "Hospitality"},
             {"subject": "Indian Tradition", "relation": "INCLUDES", "object": "Family Values"},
@@ -338,7 +356,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_what_are_question_stays_on_requested_node(self):
         app_server.extract_text_from_pdf = lambda _: "Saris reflect Indian tradition."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Saris", "relation": "REFLECTS", "object": "Indian Tradition"},
         ]
         self.client.post("/upload_pdf", files={"file": ("saris.pdf", b"%PDF", "application/pdf")})
@@ -348,7 +366,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_include_question_prefers_include_neighbors(self):
         app_server.extract_text_from_pdf = lambda _: "Festivals include rituals, food, and gatherings. India celebrates festivals."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Festival", "relation": "INCLUDES", "object": "Rituals"},
             {"subject": "Festival", "relation": "INCLUDES", "object": "Food"},
             {"subject": "Festival", "relation": "INCLUDES", "object": "Gatherings"},
@@ -361,7 +379,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_what_is_question_returns_node_summary(self):
         app_server.extract_text_from_pdf = lambda _: "Indian tradition includes spirituality, hospitality, and family values."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Tradition", "relation": "INCLUDES", "object": "Spirituality"},
             {"subject": "Indian Tradition", "relation": "INCLUDES", "object": "Hospitality"},
             {"subject": "Indian Tradition", "relation": "INCLUDES", "object": "Family Values"},
@@ -376,7 +394,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_celebrate_question_aggregates_related_values(self):
         app_server.extract_text_from_pdf = lambda _: "Indian culture celebrates family, respect, spirituality, and hospitality."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Culture", "relation": "CELEBRATES", "object": "Family"},
             {"subject": "Indian Culture", "relation": "CELEBRATES", "object": "Respect"},
             {"subject": "Indian Culture", "relation": "CELEBRATES", "object": "Spirituality"},
@@ -393,7 +411,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_general_entity_question_returns_multi_fact_summary(self):
         app_server.extract_text_from_pdf = lambda _: "Indian culture reflects unity in diversity and celebrates family, respect, spirituality, and hospitality."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Culture", "relation": "REFLECTS", "object": "Unity In Diversity"},
             {"subject": "Indian Culture", "relation": "CELEBRATES", "object": "Family"},
             {"subject": "Indian Culture", "relation": "CELEBRATES", "object": "Respect"},
@@ -411,7 +429,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_relation_specific_query_does_not_fall_back_to_unrelated_edge(self):
         app_server.extract_text_from_pdf = lambda _: "Indian culture celebrates family and respect. Culture influences global trends."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Culture", "relation": "CELEBRATES", "object": "Family"},
             {"subject": "Indian Culture", "relation": "CELEBRATES", "object": "Respect"},
             {"subject": "Culture", "relation": "INFLUENCES", "object": "Global Trends"},
@@ -426,7 +444,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_relation_specific_question_uses_requested_relation_family_generically(self):
         app_server.extract_text_from_pdf = lambda _: "The Indian Constitution guarantees justice, equality, and liberty."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Constitution", "relation": "GUARANTEES", "object": "Justice"},
             {"subject": "Indian Constitution", "relation": "GUARANTEES", "object": "Equality"},
             {"subject": "Indian Constitution", "relation": "GUARANTEES", "object": "Liberty"},
@@ -442,7 +460,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_relation_question_prefers_edges_covering_multiple_query_terms(self):
         app_server.extract_text_from_pdf = lambda _: "India was partitioned from Pakistan. India practices federalism."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "India", "relation": "PARTITIONED_FROM", "object": "Pakistan"},
             {"subject": "India", "relation": "PRACTICES", "object": "Federalism"},
         ]
@@ -471,7 +489,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_entity_only_question_returns_all_relation_groups(self):
         app_server.extract_text_from_pdf = lambda _: "Indian culture reflects unity in diversity, celebrates family and hospitality, and practices yoga."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Culture", "relation": "REFLECTS", "object": "Unity In Diversity"},
             {"subject": "Indian Culture", "relation": "CELEBRATES", "object": "Family"},
             {"subject": "Indian Culture", "relation": "CELEBRATES", "object": "Hospitality"},
@@ -487,7 +505,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_indirect_multi_hop_query_uses_path_chain(self):
         app_server.extract_text_from_pdf = lambda _: "Elon Musk founded SpaceX. SpaceX is based in USA."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Elon Musk", "relation": "FOUNDED", "object": "SpaceX"},
             {"subject": "SpaceX", "relation": "BASED_IN", "object": "USA"},
         ]
@@ -504,7 +522,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_inverse_relation_answer_is_grammatically_natural(self):
         app_server.extract_text_from_pdf = lambda _: "Indian cuisine includes vegetables."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Cuisine", "relation": "INCLUDES", "object": "Vegetables"},
         ]
         self.client.post("/upload_pdf", files={"file": ("food.pdf", b"%PDF", "application/pdf")})
@@ -517,7 +535,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_unrelated_question_does_not_return_false_positive(self):
         app_server.extract_text_from_pdf = lambda _: "Baba Saheb Dr Ambedkar is known as Father of the Indian Constitution."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {
                 "subject": "Baba Saheb Dr Ambedkar",
                 "relation": "KNOWN_AS",
@@ -537,7 +555,7 @@ class AppSmokeTests(unittest.TestCase):
             "The Constituent Assembly drafted the Indian Constitution. "
             "The Indian Constitution was adopted on 26 November 1949."
         )
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Constituent Assembly", "relation": "DRAFTED", "object": "Indian Constitution"},
             {"subject": "Constituent Assembly", "relation": "CONVENED_IN", "object": "December 1946"},
             {"subject": "Indian Constitution", "relation": "ADOPTED_ON", "object": "26 November 1949"},
@@ -715,7 +733,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_entity_only_answer_includes_incoming_and_outgoing_facts(self):
         app_server.extract_text_from_pdf = lambda _: "Indian Constitution includes Fundamental Rights. Constituent Assembly drafted Indian Constitution."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Constitution", "relation": "INCLUDES", "object": "Fundamental Rights"},
             {"subject": "Constituent Assembly", "relation": "DRAFTED", "object": "Indian Constitution"},
         ]
@@ -727,7 +745,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_adjective_qualified_entity_question_prefers_specific_node(self):
         app_server.extract_text_from_pdf = lambda _: "A good Constitution protects basic structure."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Constitution", "relation": "INCLUDES", "object": "Lists"},
             {"subject": "Good Constitution", "relation": "DOES_NOT_ALLOW", "object": "Easy Overthrow of Provisions"},
             {"subject": "Good Constitution", "relation": "PROTECTS", "object": "Rights of Citizens"},
@@ -763,7 +781,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_what_is_constitution_prefers_clean_anchor_over_long_noisy_node(self):
         app_server.extract_text_from_pdf = lambda _: "The Constitution contains fundamental rights."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {
                 "subject": "various minority communities also expressed the need for the Constitution to",
                 "relation": "INCLUDES",
@@ -788,7 +806,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_who_is_father_of_constitution_returns_ambedkar_fact(self):
         app_server.extract_text_from_pdf = lambda _: "Baba Saheb Dr Ambedkar is known as Father of the Indian Constitution."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {
                 "subject": "Baba Saheb Dr Ambedkar",
                 "relation": "KNOWN_AS",
@@ -808,7 +826,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_when_question_uses_temporal_relation_and_fuzzy_entity_match(self):
         app_server.extract_text_from_pdf = lambda _: "The Indian National Movement began in 1885. Indian National Congress made demand for Constituent Assembly."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian National Movement", "relation": "BEGAN_IN", "object": "1885"},
             {"subject": "Indian National Congress", "relation": "MADE_DEMAND", "object": "Constituent Assembly"},
         ]
@@ -819,7 +837,7 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_plain_topic_phrase_with_relation_like_noun_is_treated_as_entity_lookup(self):
         app_server.extract_text_from_pdf = lambda _: "The Indian Constitution features Separation of Powers. Separation Between Religion defines Secularism."
-        app_server.extract_triples_groq = lambda chunk: [
+        app_server.extract_triples_llm = lambda chunk: [
             {"subject": "Indian Constitution", "relation": "FEATURES", "object": "Separation of Powers"},
             {"subject": "Separation Between Religion", "relation": "DEFINES", "object": "Secularism"},
         ]

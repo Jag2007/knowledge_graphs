@@ -6,8 +6,8 @@ import re
 import threading
 import time
 
-from groq import Groq
 from dotenv import load_dotenv
+from openai import OpenAI
 
 from kg_app.core.utils import (
     extract_first_json,
@@ -99,15 +99,69 @@ INVALID_SUBJECTS = {
 _EXTRACTION_CACHE: dict[str, list[dict]] = {}
 _REQUEST_LOCK = threading.Lock()
 _LAST_REQUEST_AT = 0.0
+_LOGGED_PROVIDER_CONFIGS: set[tuple[str, str]] = set()
 DEBUG_LLM_OUTPUT = os.environ.get("KG_DEBUG_LLM_OUTPUT", "0").strip().lower() in {"1", "true", "yes"}
 _TRAILING_ARTICLES = re.compile(r"\b(its|their|his|her|the|an|a)\s*$", re.IGNORECASE)
 
 
-def _get_client() -> Groq:
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise RuntimeError("GROQ_API_KEY is missing.")
-    return Groq(api_key=api_key)
+def _env_flag(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+VERBOSE_BACKEND_LOGS = _env_flag("KG_VERBOSE_BACKEND_LOGS", "1")
+
+
+def _backend_log(message: str) -> None:
+    if VERBOSE_BACKEND_LOGS:
+        print(f"[extractor] {message}", flush=True)
+
+
+def _get_provider() -> str:
+    if os.environ.get("HEBBRIX_API_KEY"):
+        return "hebbrix"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    return "unknown"
+
+
+def _provider_label() -> str:
+    provider = _get_provider()
+    if provider == "hebbrix":
+        return "Hebbrix"
+    if provider == "openai":
+        return "OpenAI-compatible"
+    return "LLM"
+
+
+def _current_base_url() -> str:
+    if _get_provider() == "hebbrix":
+        return os.environ.get("HEBBRIX_BASE_URL", "https://api.hebbrix.com/v1").strip()
+    return os.environ.get("OPENAI_BASE_URL", "").strip()
+
+
+def _get_client():
+    if os.environ.get("HEBBRIX_API_KEY"):
+        config = ("hebbrix", _current_base_url() or "default")
+        if config not in _LOGGED_PROVIDER_CONFIGS:
+            _backend_log(f"Using Hebbrix provider with base URL {config[1]}.")
+            _LOGGED_PROVIDER_CONFIGS.add(config)
+        return OpenAI(
+            api_key=os.environ.get("HEBBRIX_API_KEY"),
+            base_url=os.environ.get("HEBBRIX_BASE_URL", "https://api.hebbrix.com/v1"),
+        )
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+        config = ("openai", base_url or "default")
+        if config not in _LOGGED_PROVIDER_CONFIGS:
+            _backend_log(f"Using OpenAI-compatible provider with base URL {config[1]}.")
+            _LOGGED_PROVIDER_CONFIGS.add(config)
+        if base_url:
+            return OpenAI(api_key=api_key, base_url=base_url)
+        return OpenAI(api_key=api_key)
+
+    raise RuntimeError("Set HEBBRIX_API_KEY or OPENAI_API_KEY in .env.")
 
 
 def _extract_retry_delay(error: Exception) -> float:
@@ -118,15 +172,58 @@ def _extract_retry_delay(error: Exception) -> float:
             return max(1.0, float(match.group(1)) + 1.0)
         except ValueError:
             pass
-    return float(os.environ.get("GROQ_RETRY_DELAY_SECONDS", "12"))
+    return float(os.environ.get("LLM_RETRY_DELAY_SECONDS", os.environ.get("GROQ_RETRY_DELAY_SECONDS", "12")))
 
 
-def _call_groq_with_retry(client: Groq, *, model: str, prompt: str):
+def _llm_error_details(error: Exception, *, model: str) -> tuple[bool, str]:
+    """
+    Return (retryable, user_facing_reason) for terminal logging and fast-fail control.
+    """
+    message = str(error or "").strip()
+    lowered = message.lower()
+    provider = _provider_label()
+    base_url = _current_base_url() or "default"
+
+    if any(code in lowered for code in ("401", "unauthorized", "invalid api key", "incorrect api key", "authentication")):
+        return False, (
+            f"{provider} authentication failed. Check your API key in .env."
+        )
+
+    if any(code in lowered for code in ("403", "forbidden", "permission")):
+        return False, (
+            f"{provider} rejected the request. Check key permissions and account access."
+        )
+
+    if any(code in lowered for code in ("404", "model_not_found", "unknown model", "does not exist")):
+        return False, (
+            f"{provider} model '{model}' was not found. Check the model name and base URL ({base_url})."
+        )
+
+    if "429" in lowered or "rate limit" in lowered:
+        return True, f"{provider} rate limit hit."
+
+    if any(code in lowered for code in ("413", "request too large", "context length", "maximum context length")):
+        return False, (
+            f"{provider} rejected the request as too large for model '{model}'. Reduce chunk/prompt size."
+        )
+
+    if any(code in lowered for code in ("dns", "name or service not known", "nodename", "connection refused", "timed out", "timeout")):
+        return True, f"{provider} network/connectivity issue while calling {base_url}."
+
+    if any(code in lowered for code in ("400", "bad request")):
+        return False, (
+            f"{provider} rejected the request as invalid. Check model '{model}', base URL ({base_url}), and payload format."
+        )
+
+    return True, f"{provider} request failed."
+
+
+def _call_llm_with_retry(client, *, model: str, prompt: str):
     global _LAST_REQUEST_AT
 
-    max_retries = max(1, int(os.environ.get("GROQ_MAX_RETRIES", "4")))
-    min_interval = max(0.0, float(os.environ.get("GROQ_MIN_INTERVAL_SECONDS", "1.5")))
-    max_tokens = max(128, int(os.environ.get("GROQ_MAX_OUTPUT_TOKENS", "1024")))
+    max_retries = max(1, int(os.environ.get("LLM_MAX_RETRIES", os.environ.get("GROQ_MAX_RETRIES", "4"))))
+    min_interval = max(0.0, float(os.environ.get("LLM_MIN_INTERVAL_SECONDS", os.environ.get("GROQ_MIN_INTERVAL_SECONDS", "1.5"))))
+    max_tokens = max(128, int(os.environ.get("LLM_MAX_OUTPUT_TOKENS", os.environ.get("GROQ_MAX_OUTPUT_TOKENS", "1024"))))
 
     last_error = None
     for attempt in range(max_retries):
@@ -137,6 +234,10 @@ def _call_groq_with_retry(client: Groq, *, model: str, prompt: str):
                 time.sleep(wait_time)
 
             try:
+                _backend_log(
+                    f"Sending LLM request with model '{model}' "
+                    f"(attempt {attempt + 1}/{max_retries}, prompt_chars={len(prompt)})."
+                )
                 completion = client.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
@@ -148,16 +249,21 @@ def _call_groq_with_retry(client: Groq, *, model: str, prompt: str):
             except Exception as error:
                 _LAST_REQUEST_AT = time.monotonic()
                 last_error = error
+                retryable, reason = _llm_error_details(error, model=model)
+                if not retryable:
+                    print(f"{reason} Full error: {error}", flush=True)
+                    raise
                 delay = _extract_retry_delay(error)
                 print(
-                    f"Groq request failed (attempt {attempt + 1}/{max_retries}). "
-                    f"Waiting {delay:.1f}s before retrying."
+                    f"{reason} Attempt {attempt + 1}/{max_retries}. "
+                    f"Waiting {delay:.1f}s before retrying.",
+                    flush=True,
                 )
 
         if attempt < max_retries - 1:
             time.sleep(delay)
 
-    raise last_error if last_error else RuntimeError("Groq extraction failed.")
+    raise last_error if last_error else RuntimeError("LLM extraction failed.")
 
 
 def precompute_chunk_metadata(chunks: list[dict]) -> list[dict]:
@@ -169,7 +275,13 @@ def precompute_chunk_metadata(chunks: list[dict]) -> list[dict]:
         return []
 
     max_chunks = max(1, int(os.environ.get("KG_METADATA_MAX_CHUNKS", "30")))
-    model = os.environ.get("GROQ_METADATA_MODEL", os.environ.get("GROQ_TRIPLE_MODEL", "llama-3.1-8b-instant"))
+    if os.environ.get("HEBBRIX_API_KEY"):
+        model = os.environ.get("HEBBRIX_METADATA_MODEL", os.environ.get("HEBBRIX_TRIPLE_MODEL", "gpt-5-nano"))
+    else:
+        model = os.environ.get("OPENAI_METADATA_MODEL", os.environ.get("OPENAI_TRIPLE_MODEL", "gpt-4.1-mini"))
+    _backend_log(
+        f"Starting chunk metadata enrichment for {len(chunks)} chunks with model '{model}'."
+    )
     payload = [
         {
             "id": chunk.get("id", f"chunk_{index + 1}"),
@@ -199,9 +311,13 @@ Chunks:
 
     try:
         client = _get_client()
-        completion = _call_groq_with_retry(client, model=model, prompt=prompt)
+        completion = _call_llm_with_retry(client, model=model, prompt=prompt)
         content = completion.choices[0].message.content or ""
-        metadata = json.loads(extract_first_json(content))
+        try:
+            metadata = json.loads(extract_first_json(content))
+        except Exception:
+            _backend_log("Metadata JSON parse failed, attempting recovery from partial objects.")
+            metadata = recover_json_objects(content)
         if not isinstance(metadata, list):
             return chunks
 
@@ -224,9 +340,10 @@ Chunks:
                     if cleaned_keywords:
                         updated["keywords"] = cleaned_keywords[:8]
             enriched.append(updated)
+        _backend_log(f"Metadata enrichment complete for {len(enriched)} chunks.")
         return enriched
     except Exception as error:
-        print(f"Chunk metadata enrichment skipped: {error}")
+        print(f"Chunk metadata enrichment skipped: {error}", flush=True)
         return chunks
 
 
@@ -472,7 +589,27 @@ def clean_and_validate_triples(triples: list) -> list:
     return valid_triples
 
 
-def extract_triples_groq(chunk: str) -> list:
+def extract_triples_fallback(text: str) -> list[dict]:
+    """
+    Lightweight local fallback when the remote LLM is unavailable.
+    This keeps the upload usable on provider failures by recovering
+    simple direct/contextual triples without any API call.
+    """
+    source = str(text or "").strip()
+    if not source:
+        return []
+
+    heuristic_triples: list[dict] = []
+    for sentence in split_into_sentences(source):
+        heuristic_triples.extend(_extract_direct_statement_triples(sentence))
+    heuristic_triples.extend(_extract_interlinked_context_triples(source))
+    cleaned = clean_and_validate_triples(heuristic_triples)
+    if cleaned:
+        _backend_log(f"Fallback extraction recovered {len(cleaned)} local triples.")
+    return cleaned
+
+
+def extract_triples_llm(chunk: str) -> list:
     """Extract triples from one chunk with strict JSON parsing and per-chunk caching."""
     text = chunk.strip()
     if not text:
@@ -480,13 +617,20 @@ def extract_triples_groq(chunk: str) -> list:
 
     cache_key = hashlib.sha1(text.encode("utf-8")).hexdigest()
     if cache_key in _EXTRACTION_CACHE:
+        _backend_log("Triple extraction cache hit.")
         return list(_EXTRACTION_CACHE[cache_key])
 
-    model = os.environ.get("GROQ_TRIPLE_MODEL", "llama-3.3-70b-versatile")
+    if os.environ.get("HEBBRIX_API_KEY"):
+        model = os.environ.get("HEBBRIX_TRIPLE_MODEL", "gpt-5-nano")
+    else:
+        model = os.environ.get("OPENAI_TRIPLE_MODEL", "gpt-4.1-mini")
+    _backend_log(
+        f"Starting triple extraction with model '{model}' for chunk of {len(text.split())} words."
+    )
     client = _get_client()
 
     def _attempt(prompt: str) -> tuple[list, str]:
-        completion = _call_groq_with_retry(client, model=model, prompt=prompt)
+        completion = _call_llm_with_retry(client, model=model, prompt=prompt)
 
         response = completion.choices[0].message.content or ""
         if DEBUG_LLM_OUTPUT:
@@ -503,12 +647,15 @@ def extract_triples_groq(chunk: str) -> list:
             triples = recover_json_objects(response)
             if not triples:
                 # If parsing still fails -> skip this chunk without crashing the full upload.
+                _backend_log("LLM response could not be parsed into JSON triples.")
                 return [], "parse_failed"
 
         cleaned = clean_and_validate_triples(triples)
         if not cleaned:
+            _backend_log("LLM response parsed, but no valid triples remained after cleaning.")
             return [], "empty"
 
+        _backend_log(f"LLM extraction produced {len(cleaned)} validated triples.")
         return cleaned, "ok"
 
     base_prompt = f"""You are an expert knowledge extraction system.
@@ -580,4 +727,10 @@ Text:
         print("CLEANED TRIPLES JSON:", json.dumps(triples, ensure_ascii=False))
 
     _EXTRACTION_CACHE[cache_key] = list(triples)
+    _backend_log(f"Triple extraction finished with {len(triples)} final triples.")
     return list(triples)
+
+
+# Backwards-compatible aliases while older imports are still being cleaned up.
+_call_groq_with_retry = _call_llm_with_retry
+extract_triples_groq = extract_triples_llm

@@ -14,9 +14,65 @@ const uploadMessage = document.getElementById("upload-message");
 const uploadChunks = document.getElementById("upload-chunks");
 const uploadTriples = document.getElementById("upload-triples");
 const answerText = document.getElementById("answer-text");
+const uploadButton = document.getElementById("upload-button");
+const askButton = document.getElementById("ask-button");
+const fileInput = document.getElementById("pdf-file");
+
+let uploadInProgress = false;
+let uploadCompleted = false;
+let uploadTimer = null;
+let uploadStartedAt = 0;
 
 function prettyJson(value) {
   return JSON.stringify(value, null, 2);
+}
+
+function extractErrorMessage(payload, fallbackMessage) {
+  if (!payload || typeof payload !== "object") {
+    return fallbackMessage;
+  }
+  if (typeof payload.error === "string" && payload.error.trim()) {
+    return payload.error;
+  }
+  if (payload.detail && typeof payload.detail === "object") {
+    if (typeof payload.detail.error === "string" && payload.detail.error.trim()) {
+      return payload.detail.error;
+    }
+  }
+  if (typeof payload.detail === "string" && payload.detail.trim()) {
+    return payload.detail;
+  }
+  return fallbackMessage;
+}
+
+function setButtonsDisabled(isDisabled) {
+  uploadButton.disabled = isDisabled;
+  fileInput.disabled = isDisabled;
+}
+
+function setAskDisabled(isDisabled) {
+  askButton.disabled = isDisabled;
+}
+
+function stopUploadTimer() {
+  if (uploadTimer) {
+    clearInterval(uploadTimer);
+    uploadTimer = null;
+  }
+}
+
+function startUploadTimer() {
+  stopUploadTimer();
+  uploadStartedAt = Date.now();
+  uploadTimer = window.setInterval(() => {
+    if (!uploadInProgress) {
+      stopUploadTimer();
+      return;
+    }
+    const elapsedSeconds = Math.max(1, Math.floor((Date.now() - uploadStartedAt) / 1000));
+    uploadStatus.textContent =
+      `Building the graph... ${elapsedSeconds}s elapsed. Large PDFs can take a little longer on Hebbrix free tier.`;
+  }, 1000);
 }
 
 function togglePanel(panel) {
@@ -31,9 +87,21 @@ document.getElementById("ask-json-toggle").addEventListener("click", () => {
   togglePanel(askJsonPanel);
 });
 
+fileInput.addEventListener("change", () => {
+  uploadCompleted = false;
+  uploadInProgress = false;
+  stopUploadTimer();
+  setAskDisabled(true);
+  uploadSummary.classList.add("hidden");
+  answerPanel.classList.add("hidden");
+  uploadStatus.textContent = fileInput.files.length
+    ? "PDF selected. Build the knowledge graph to start asking questions."
+    : "No PDF uploaded yet.";
+  askStatus.textContent = "Ask a question after the PDF finishes processing.";
+});
+
 uploadForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const fileInput = document.getElementById("pdf-file");
 
   if (!fileInput.files.length) {
     uploadStatus.textContent = "Please choose a PDF file first.";
@@ -47,12 +115,19 @@ uploadForm.addEventListener("submit", async (event) => {
     content_type: fileInput.files[0].type || "application/pdf",
   });
 
-  uploadStatus.textContent = "Uploading the PDF and building the graph...";
+  uploadInProgress = true;
+  uploadCompleted = false;
+  setButtonsDisabled(true);
+  setAskDisabled(true);
+  uploadStatus.textContent = "Uploading the PDF and starting graph processing...";
+  askStatus.textContent = "Wait for the upload to finish before asking questions.";
   uploadSummary.classList.add("hidden");
+  answerPanel.classList.add("hidden");
   uploadJsonContent.textContent = prettyJson({
     status: "processing",
-    message: "The PDF is being uploaded and processed. Large documents can take a little longer.",
+    message: "The PDF is being uploaded and processed. The frontend will update when the graph is ready.",
   });
+  startUploadTimer();
 
   try {
     const response = await fetch("/upload_pdf", {
@@ -63,19 +138,29 @@ uploadForm.addEventListener("submit", async (event) => {
     const data = await response.json();
     uploadJsonContent.textContent = prettyJson(data);
 
-    if (!response.ok || data.error) {
-      uploadStatus.textContent = data.error || "The PDF could not be processed.";
+    if (!response.ok || data.error || (data.detail && data.detail.error)) {
+      uploadStatus.textContent = extractErrorMessage(data, "The PDF could not be processed.");
+      askStatus.textContent = "Upload did not finish successfully. Fix the issue and try again.";
       return;
     }
 
-    uploadStatus.textContent = "The PDF was uploaded and the graph was created successfully.";
-    uploadMessage.textContent = data.message || "Graph created successfully.";
+    uploadCompleted = true;
+    uploadStatus.textContent =
+      `Graph ready. Processed ${data.chunks_processed ?? 0} chunks and stored ${data.triples_added ?? 0} triples.`;
+    uploadMessage.textContent = data.message || "PDF processed successfully.";
     uploadChunks.textContent = data.chunks_processed ?? 0;
     uploadTriples.textContent = data.triples_added ?? 0;
     uploadSummary.classList.remove("hidden");
+    askStatus.textContent = "Upload complete. You can ask questions now.";
   } catch (error) {
     uploadStatus.textContent = "The upload request failed. Please try again.";
+    askStatus.textContent = "Upload failed before the graph was ready.";
     uploadJsonContent.textContent = prettyJson({ error: String(error) });
+  } finally {
+    uploadInProgress = false;
+    stopUploadTimer();
+    setButtonsDisabled(false);
+    setAskDisabled(!uploadCompleted);
   }
 });
 
@@ -88,8 +173,19 @@ askForm.addEventListener("submit", async (event) => {
     return;
   }
 
+  if (uploadInProgress) {
+    askStatus.textContent = "The PDF is still processing. Please wait until the graph is ready.";
+    return;
+  }
+
+  if (!uploadCompleted) {
+    askStatus.textContent = "Upload and finish processing a PDF before asking questions.";
+    return;
+  }
+
   askStatus.textContent = "Searching the knowledge graph...";
   answerPanel.classList.add("hidden");
+  setAskDisabled(true);
 
   try {
     const requestBody = { question };
@@ -110,7 +206,7 @@ askForm.addEventListener("submit", async (event) => {
     askJsonContent.textContent = prettyJson(data);
 
     if (!response.ok) {
-      askStatus.textContent = data.detail || "The question could not be processed.";
+      askStatus.textContent = extractErrorMessage(data, "The question could not be processed.");
       answerText.textContent = "";
       return;
     }
@@ -122,5 +218,9 @@ askForm.addEventListener("submit", async (event) => {
   } catch (error) {
     askStatus.textContent = "The question request failed. Please try again.";
     askJsonContent.textContent = prettyJson({ error: String(error) });
+  } finally {
+    setAskDisabled(!uploadCompleted);
   }
 });
+
+setAskDisabled(true);

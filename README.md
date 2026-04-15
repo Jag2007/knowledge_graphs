@@ -7,7 +7,7 @@ A FastAPI app that converts PDFs into a MongoDB-backed knowledge graph and answe
 - Python
 - FastAPI
 - MongoDB Atlas with `pymongo`
-- Groq API
+- Hebbrix API (OpenAI-compatible)
 - PyMuPDF
 - sentence-transformers
 - unittest
@@ -43,7 +43,7 @@ Knowledge Graphs/
 ## Main Features
 
 - Upload a PDF and build a document-scoped knowledge graph
-- Extract triples using Groq
+- Extract triples using Hebbrix or another OpenAI-compatible API
 - Store graph data in MongoDB
 - Store chunks locally for semantic retrieval
 - Ask natural-language questions about the active uploaded PDF
@@ -67,7 +67,10 @@ pip install -r requirements.txt
 ### 3. Create `.env`
 
 ```env
-GROQ_API_KEY=your_groq_api_key
+HEBBRIX_API_KEY=your_hebbrix_api_key
+HEBBRIX_BASE_URL=https://api.hebbrix.com/v1
+HEBBRIX_TRIPLE_MODEL=gpt-5-nano
+HEBBRIX_METADATA_MODEL=gpt-5-nano
 MONGO_URI=your_mongodb_connection_string
 DB_NAME=knowledge_graph
 ```

@@ -8,3 +8,4 @@ python-multipart
 sentence-transformers
 pymongo
 dnspython
+requests
