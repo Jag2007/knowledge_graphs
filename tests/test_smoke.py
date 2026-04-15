@@ -160,6 +160,10 @@ class AppSmokeTests(unittest.TestCase):
         self.original_precompute_metadata = app_server.precompute_chunk_metadata
         self.original_set_active_document = app_server.set_active_document
         self.original_get_active_document = app_server.get_active_document
+        self.original_search_hebbrix = app_server._search_hebbrix
+        self.original_chat_hebbrix = app_server._chat_hebbrix
+        self.original_fetch_hebbrix_chunks = app_server._fetch_hebbrix_chunks
+        self.original_query_hebbrix_graph = app_server._query_hebbrix_graph
 
         app_server.GraphStore = FakeGraph
         query_engine.GraphStore = FakeGraph
@@ -184,6 +188,10 @@ class AppSmokeTests(unittest.TestCase):
         app_server.precompute_chunk_metadata = self.original_precompute_metadata
         app_server.set_active_document = self.original_set_active_document
         app_server.get_active_document = self.original_get_active_document
+        app_server._search_hebbrix = self.original_search_hebbrix
+        app_server._chat_hebbrix = self.original_chat_hebbrix
+        app_server._fetch_hebbrix_chunks = self.original_fetch_hebbrix_chunks
+        app_server._query_hebbrix_graph = self.original_query_hebbrix_graph
         chunk_store.clear_all_document_chunks()
 
     def _set_active_document(self, document_id, file_name):
@@ -226,6 +234,114 @@ class AppSmokeTests(unittest.TestCase):
         }
         self.assertEqual(app_server._extract_hebbrix_id(payload, "id", "document_id"), "doc-123")
         self.assertEqual(app_server._extract_hebbrix_document(payload)["status"], "searchable")
+
+    def test_hebbrix_toc_like_passages_are_filtered(self):
+        self.assertTrue(
+            app_server._is_toc_like_text(
+                "Chapter 4: MRS GREN .... Chapter 5: Fields of biology .... Chapter 6: Molecules of life"
+            )
+        )
+        self.assertFalse(
+            app_server._is_toc_like_text(
+                "Plants are living organisms that make food using sunlight, water, and carbon dioxide."
+            )
+        )
+
+    def test_hebbrix_passage_selector_prefers_relevant_definition_over_toc(self):
+        chunks = [
+            {"text": "Chapter 4: MRS GREN .... Chapter 5: Fields of biology .... Chapter 9: Introduction to plants"},
+            {"text": "Plants are living organisms that make food using sunlight, water, and carbon dioxide."},
+        ]
+        passages = app_server._select_hebbrix_chunk_passages("what is plant", chunks, limit=2)
+        self.assertTrue(len(passages) >= 1)
+        self.assertIn("Plants are living organisms", passages[0])
+
+    def test_hebbrix_grounded_answer_prefers_short_definition_sentence(self):
+        results = [
+            {
+                "text": (
+                    "Chapter 9: Introduction to plants. Let’s not hold back here, plants are amazing. "
+                    "A plant is a multicellular organism with the ability to perform photosynthesis. "
+                    "They have relatively simple body plans with roots, stems, leaves and often flowers and fruit."
+                )
+            },
+            {
+                "text": (
+                    "Plants use sunlight, water, and carbon dioxide to produce sugars through photosynthesis."
+                )
+            },
+        ]
+        answer = app_server._build_grounded_hebbrix_answer(results, question="what is plant")
+        self.assertIn("A plant is a multicellular organism", answer)
+        self.assertNotIn("Chapter 9", answer)
+
+    def test_hebbrix_answers_are_limited_to_active_document_results(self):
+        os.environ["HEBBRIX_NATIVE_MODE"] = "1"
+        self._set_active_document("hebbrix:col-1:doc-1", "biology.pdf")
+        app_server._search_hebbrix = lambda question, collection_id, document_id="": {
+            "results": [
+                {
+                    "content": "Biology studies life and living organisms.",
+                    "metadata": {"document_id": "doc-1"},
+                },
+                {
+                    "content": "The Constitution defines the legal structure of the state.",
+                    "metadata": {"document_id": "doc-2"},
+                },
+            ]
+        }
+        app_server._chat_hebbrix = lambda question, collection_id, document_id="", context_snippets=None: {
+            "choices": [
+                {
+                    "message": {
+                        "content": "Biology studies life and living organisms."
+                    }
+                }
+            ]
+        }
+        app_server._fetch_hebbrix_chunks = lambda document_id: [
+            {"text": "Biology studies life and living organisms."}
+        ]
+        app_server._query_hebbrix_graph = lambda question, collection_id: {"results": []}
+
+        response = self.client.post("/ask", json={"question": "what does biology study"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("Biology studies life", payload["answer"])
+        self.assertEqual(len(payload["results"]), 1)
+
+    def test_hebbrix_rejects_questions_not_supported_by_uploaded_document(self):
+        os.environ["HEBBRIX_NATIVE_MODE"] = "1"
+        self._set_active_document("hebbrix:col-1:doc-1", "biology.pdf")
+        app_server._search_hebbrix = lambda question, collection_id, document_id="": {
+            "results": [
+                {
+                    "content": "Biology studies life and living organisms.",
+                    "metadata": {"document_id": "doc-1"},
+                }
+            ]
+        }
+        app_server._chat_hebbrix = lambda question, collection_id, document_id="", context_snippets=None: {
+            "choices": [
+                {
+                    "message": {
+                        "content": "The constitution is the supreme law of the land."
+                    }
+                }
+            ]
+        }
+        app_server._fetch_hebbrix_chunks = lambda document_id: [
+            {"text": "Biology studies life and living organisms."}
+        ]
+        app_server._query_hebbrix_graph = lambda question, collection_id: {"results": []}
+
+        response = self.client.post("/ask", json={"question": "what is constitution"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["answer"], "It is not in the uploaded document. Please check the text.")
+        self.assertEqual(payload["results"], [])
 
     def test_upload_and_ask_flow(self):
         app_server.extract_text_from_pdf = lambda _: "Mukesh Ambani chairs Reliance Industries. Reliance Industries is based in India."
