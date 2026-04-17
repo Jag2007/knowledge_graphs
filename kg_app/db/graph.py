@@ -185,15 +185,31 @@ class GraphStore:
                 if value:
                     names[value.lower()] = value
 
+        def _relevance_score(lowered: str, original: str) -> float:
+            if not cleaned_terms:
+                return 0.0
+            score = 0.0
+            for term in cleaned_terms:
+                if lowered == term:
+                    score += 3.0
+                elif lowered.startswith(term) or lowered.endswith(term):
+                    score += 2.0
+                elif term in lowered:
+                    score += 1.0
+            return score
+
         matches = []
         for lowered, original in names.items():
             if cleaned_terms and any(term in lowered for term in cleaned_terms):
-                matches.append({"entity_name": original})
+                score = _relevance_score(lowered, original)
+                matches.append({"entity_name": original, "_score": score})
 
         if not matches:
-            matches = [{"entity_name": original} for _, original in sorted(names.items(), key=lambda item: (len(item[1]), item[1]))]
+            matches = [{"entity_name": original, "_score": 0.0} for _, original in names.items()]
 
-        matches = sorted(matches, key=lambda row: (len(row["entity_name"]), row["entity_name"]))[:limit]
+        matches = sorted(matches, key=lambda row: -row["_score"])[:limit]
+        for m in matches:
+            m.pop("_score", None)
         return "MONGO_ENTITY_LOOKUP", matches
 
     def get_entity_neighborhood(self, entity_name: str, document_id: str, limit: int = 20) -> tuple[str, list[dict]]:

@@ -568,18 +568,40 @@ def _is_plain_entity_query(question: str) -> bool:
     return bool(tokens) and len(tokens) <= 4 and "?" not in question
 
 
+def _requires_phrase_match(question: str, relation_hints: set[str], phrases: list[str]) -> bool:
+    if relation_hints or not phrases:
+        return False
+    text = question.strip().lower()
+    if text.startswith(("what is ", "what are ", "who is ", "who was ")):
+        return True
+    if _is_node_overview_question(question):
+        return True
+    if text.startswith(("what ", "who ", "when ", "where ", "which ", "how ")):
+        return False
+    if _is_plain_entity_query(question):
+        return True
+    return False
+
+
 def _is_explicit_relation_question(question: str, relation_hints: set[str]) -> bool:
     """Avoid treating nouns inside topic phrases as relation requests."""
     if not relation_hints:
         return False
 
     text = question.strip().lower()
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]*", question)
+    relation_word_present = any(token.lower() in RELATION_HINTS for token in tokens)
+    has_capitalized_phrase = bool(
+        re.search(r"\b[A-Z][A-Za-z0-9_-]*(?:\s+[A-Z][A-Za-z0-9_-]*)+\b", question)
+    )
     if text.startswith(("what does ", "what did ", "when ", "where ", "who ", "which ")):
         return True
     if re.match(r"what\s+(is|are)\s+the\s+", text):
         return True
     if _is_node_overview_question(question):
         return False
+    if _is_plain_entity_query(question) and relation_word_present and has_capitalized_phrase:
+        return True
     if _is_plain_entity_query(question) and not text.startswith(("what is the ", "what are the ", "where ", "when ", "who ")):
         return False
     return True
@@ -672,7 +694,7 @@ def _score_direct_row(row: dict, terms: list[str]) -> int:
     return score
 
 
-def _format_direct_results(question: str, results: list[dict], terms: list[str], relation_hints: set[str]) -> str:
+def _format_direct_results(question: str, results: list[dict], terms: list[str], relation_hints: set[str], phrases: list[str] | None = None) -> str:
     cleaned_rows = []
     for row in results:
         subject = _clean_entity_text(row.get("from_name", ""))
@@ -691,6 +713,15 @@ def _format_direct_results(question: str, results: list[dict], terms: list[str],
 
     if not cleaned_rows:
         return ""
+
+    if _requires_phrase_match(question, relation_hints, phrases or []):
+        phrase_rows = [
+            row for row in cleaned_rows
+            if _phrase_coverage(f"{row['subject']} {row['object']}", phrases or []) > 0
+        ]
+        if not phrase_rows:
+            return ""
+        cleaned_rows = phrase_rows
 
     minimum_coverage = _required_term_coverage(terms)
     if minimum_coverage >= 2:
@@ -1057,10 +1088,18 @@ def _search_semantic_chunks(
     return reranked[:limit]
 
 
-def _format_chunk_answer(question: str, hits: list[dict], terms: list[str]) -> str:
+def _format_chunk_answer(
+    question: str,
+    hits: list[dict],
+    terms: list[str],
+    phrases: list[str] | None = None,
+    relation_hints: set[str] | None = None,
+) -> str:
     if not hits:
         return ""
 
+    phrases = phrases or []
+    relation_hints = relation_hints or set()
     chosen_sentences: list[str] = []
     seen = set()
     for hit in hits:
@@ -1081,6 +1120,22 @@ def _format_chunk_answer(question: str, hits: list[dict], terms: list[str]) -> s
     if not chosen_sentences:
         return ""
 
+    all_sentences = list(chosen_sentences)
+    lower_question = question.strip().lower()
+    preferred_sentences: list[str] = []
+    if lower_question.startswith("where ") and relation_hints & {"LOCATED_IN", "BASED_IN"}:
+        preferred_sentences = [
+            sentence for sentence in all_sentences
+            if "located in" in sentence.lower() or "based in" in sentence.lower()
+        ]
+    elif lower_question.startswith("when "):
+        preferred_sentences = [
+            sentence for sentence in all_sentences
+            if re.search(r"\b\d{4}\b|\b\d{1,2}\s+[A-Z][a-z]+\s+\d{4}\b", sentence)
+        ]
+    if preferred_sentences:
+        chosen_sentences = preferred_sentences
+
     minimum_coverage = _required_term_coverage(terms)
     filtered = [
         sentence for sentence in chosen_sentences
@@ -1089,12 +1144,28 @@ def _format_chunk_answer(question: str, hits: list[dict], terms: list[str]) -> s
     if filtered:
         chosen_sentences = filtered
 
-    if question.strip().lower().startswith(("when ", "where ", "who ")):
+    if _requires_phrase_match(question, relation_hints, phrases):
+        phrase_filtered = [
+            sentence for sentence in chosen_sentences
+            if _phrase_coverage(sentence, phrases) > 0
+        ]
+        if not phrase_filtered:
+            return ""
+        chosen_sentences = phrase_filtered
+
+    if preferred_sentences:
+        preferred_remaining = [sentence for sentence in chosen_sentences if sentence in preferred_sentences]
+        if preferred_remaining:
+            chosen_sentences = preferred_remaining
+        else:
+            chosen_sentences = preferred_sentences
+
+    if lower_question.startswith(("when ", "where ", "who ")):
         chosen_sentences = chosen_sentences[:1]
 
     if len(chosen_sentences) == 1:
         sentence = chosen_sentences[0]
-        if question.strip().lower().startswith(("when ", "where ", "who ")):
+        if lower_question.startswith(("when ", "where ", "who ")):
             sentence = re.sub(r"^The\s+(?=[A-Z])", "", sentence)
         return sentence if sentence.endswith((".", "!", "?")) else sentence + "."
     return "Based on the uploaded document: " + " ".join(
@@ -1153,7 +1224,13 @@ def _prefer_chunk_answer(question: str, graph_answer: str, chunk_answer: str, te
 
 
 def _response_with_chunk_fallback(base_response: dict, question: str, chunk_hits: list[dict], terms: list[str], relation_hints: set[str], phrases: list[str]) -> dict:
-    chunk_answer = _format_chunk_answer(question, chunk_hits, terms)
+    chunk_answer = _format_chunk_answer(
+        question,
+        chunk_hits,
+        terms,
+        phrases=phrases,
+        relation_hints=relation_hints,
+    )
     if not _prefer_chunk_answer(question, base_response.get("answer", ""), chunk_answer, terms, relation_hints, phrases):
         return base_response
 
@@ -1467,9 +1544,16 @@ def ask_question(question: str, document_id: str) -> dict:
             relation_hints = set()
             relation_groups = []
         should_use_multi_hop = _is_multi_hop_question(question, relation_groups)
+        should_prioritize_path = len(relation_groups) >= 2 or _MULTI_HOP_REGEX.search(question) is not None
         entity_search_terms = entity_phrases + (terms or expanded_terms)
         entity_cypher, entity_candidates = graph.find_relevant_entities(entity_search_terms, document_id, limit=12)
         anchor_entities = _rank_anchor_entities(terms or expanded_terms, entity_phrases, entity_candidates)
+        if _requires_phrase_match(question, relation_hints, entity_phrases):
+            anchor_entities = [
+                entity_name
+                for entity_name in anchor_entities
+                if _phrase_coverage(entity_name, entity_phrases) > 0
+            ]
         graph_expanded_terms = list(expanded_terms)
         for entity_name in anchor_entities[:5]:
             for token in _tokenize_value(entity_name):
@@ -1521,7 +1605,7 @@ def ask_question(question: str, document_id: str) -> dict:
                 return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
         path_cypher = ""
-        if should_use_multi_hop:
+        if should_prioritize_path:
             path_cypher, path_results = graph.search_paths(expanded_terms, document_id, max_hops=3, limit=80)
             path_answer = _format_path_results(path_results, expanded_terms, relation_hints) if path_results else ""
             if path_answer:
@@ -1582,8 +1666,14 @@ def ask_question(question: str, document_id: str) -> dict:
             return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
         direct_cypher, direct_results = graph.search_related(expanded_terms, document_id, limit=25)
-        if direct_results:
-            direct_answer = _format_direct_results(question, direct_results, expanded_terms, relation_hints)
+        if direct_results and len(relation_groups) < 2:
+            direct_answer = _format_direct_results(
+                question,
+                direct_results,
+                expanded_terms,
+                relation_hints,
+                phrases=entity_phrases,
+            )
             if direct_answer:
                 response = {
                     "triples_added": total_triples,
@@ -1601,8 +1691,14 @@ def ask_question(question: str, document_id: str) -> dict:
                 return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
         semantic_cypher, semantic_results = graph.search_semantic(expanded_terms, document_id, limit=40)
-        if semantic_results:
-            semantic_answer = _format_direct_results(question, semantic_results, expanded_terms, relation_hints)
+        if semantic_results and len(relation_groups) < 2:
+            semantic_answer = _format_direct_results(
+                question,
+                semantic_results,
+                expanded_terms,
+                relation_hints,
+                phrases=entity_phrases,
+            )
             if semantic_answer:
                 response = {
                     "triples_added": total_triples,
@@ -1620,7 +1716,7 @@ def ask_question(question: str, document_id: str) -> dict:
                 return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
         path_cypher, path_results = graph.search_paths(expanded_terms, document_id, max_hops=3, limit=80)
-        if path_results:
+        if should_use_multi_hop and path_results:
             path_answer = _format_path_results(path_results, expanded_terms, relation_hints)
             if path_answer:
                 response = {
@@ -1639,7 +1735,13 @@ def ask_question(question: str, document_id: str) -> dict:
                 }
                 return _response_with_chunk_fallback(response, question, chunk_hits, graph_expanded_terms, relation_hints, entity_phrases)
 
-        chunk_answer = _format_chunk_answer(question, chunk_hits, graph_expanded_terms)
+        chunk_answer = _format_chunk_answer(
+            question,
+            chunk_hits,
+            graph_expanded_terms,
+            phrases=entity_phrases,
+            relation_hints=relation_hints,
+        )
         if chunk_answer:
             return {
                 "triples_added": total_triples,

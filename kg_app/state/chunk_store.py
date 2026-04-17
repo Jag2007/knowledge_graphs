@@ -36,15 +36,7 @@ def _normalise_chunk(chunk, index: int) -> dict:
             else [],
             "section": str(chunk.get("section", "Document")).strip() or "Document",
             "page": chunk.get("page"),
-            "embedding": chunk.get("embedding") if isinstance(chunk.get("embedding"), list) else embed_text(
-                " ".join(
-                    [
-                        text,
-                        str(chunk.get("summary", "")).strip(),
-                        " ".join(chunk.get("keywords", []) if isinstance(chunk.get("keywords", []), list) else []),
-                    ]
-                )
-            ),
+            "embedding": chunk.get("embedding") if isinstance(chunk.get("embedding"), list) else embed_text(text),
         }
 
     text = str(chunk).strip()

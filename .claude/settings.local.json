@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from kg_app.core.embeddings import embed_text, _load_sentence_transformer; m = _load_sentence_transformer\\(\\); print\\('Sentence transformer available:', m is not None and m is not False\\)\")",
+      "Bash(ls venv/lib/python3.*/site-packages/)",
+      "Bash(python3.13 --version)",
+      "Bash(python3.13 -c \"import sys; print\\(sys.path[:2]\\)\")",
+      "Bash(/usr/bin/python3 -m pytest tests/test_smoke.py -x -q)",
+      "Bash(venv/bin/python3 -m pytest tests/test_smoke.py -x -q)",
+      "Bash(venv/bin/python3 -m pip install pytest fastapi httpx)",
+      "Bash(venv/bin/python3 -m pip install httpx starlette)",
+      "Bash(venv/bin/python3 -m pytest tests/test_smoke.py -q')",
+      "Bash(venv/bin/python3 -m pytest tests/test_multi_pdf_regression.py -q)",
+      "WebSearch",
+      "WebFetch(domain:hebbrix.com)",
+      "WebFetch(domain:docs.hebbrix.com)",
+      "WebFetch(domain:www.hebbrix.com)",
+      "WebFetch(domain:theaidb.com)",
+      "WebFetch(domain:api.hebbrix.com)",
+      "WebFetch(domain:hebbrixai.com)",
+      "Bash(ls /Users/manavpatel/Downloads/Modern*.pdf)",
+      "Bash(venv/bin/python3 -m uvicorn kg_app.api.server:app --host 127.0.0.1 --port 8765)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(curl -s http://127.0.0.1:8765/health)",
+      "Bash(curl -s http://127.0.0.1:8765/)",
+      "Bash(curl *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('chunks:', d.get\\('chunks_saved'\\)\\); print\\('triples:', d.get\\('triples_added'\\)\\); print\\('doc_id:', d.get\\('document_id'\\)\\); print\\('hebbrix_doc_id:', d.get\\('debug',{}\\).get\\('hebbrix_document_id','N/A'\\)\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('ANSWER:', d.get\\('answer'\\)\\); print\\('STEPS:', d.get\\('steps'\\)\\); print\\('RESULTS:', len\\(d.get\\('results', []\\)\\)\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('ANSWER:', d.get\\('answer'\\)\\); print\\('STEPS:', d.get\\('steps'\\)\\)\")",
+      "Bash(wait)",
+      "Bash(kill 46033)",
+      "Bash(echo \"PID: $!\" sleep 4)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d.get\\('answer',''\\)[:80]\\)\")",
+      "Bash(kill 48222)"
+    ]
+  }
+}

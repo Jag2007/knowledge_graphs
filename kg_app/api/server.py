@@ -255,7 +255,7 @@ def _create_hebbrix_collection(file_name: str) -> dict:
 
 
 def _upload_hebbrix_document(file_name: str, content: bytes, collection_id: str) -> dict:
-    upload_paths = ["/documents/upload", "/documents"]
+    upload_paths = ["/documents", "/documents/upload"]
     last_error = None
     for path in upload_paths:
         try:
@@ -274,10 +274,10 @@ def _upload_hebbrix_document(file_name: str, content: bytes, collection_id: str)
             return payload
         except Exception as error:
             last_error = error
-            message = str(error)
-            retryable_path = any(token in message for token in ("(404)", "(405)", "Method Not Allowed", "Not Found"))
-            if path != upload_paths[-1] and retryable_path:
-                _backend_log(f"Hebbrix upload path {path} was rejected. Trying the next documented upload path.")
+            if path != upload_paths[-1]:
+                _backend_log(
+                    f"Hebbrix upload via {path} failed ({error}). Trying the next available upload path."
+                )
                 continue
             raise
     raise RuntimeError(f"Hebbrix document upload failed: {last_error}")
@@ -349,6 +349,16 @@ def _search_hebbrix(question: str, collection_id: str, document_id: str = "") ->
     if document_id:
         payload["document_id"] = document_id
     return _hebbrix_request("POST", "/search", payload=payload)
+
+
+def _search_hebbrix_reason(question: str, collection_id: str, *, include_steps: bool = True) -> dict:
+    payload = {
+        "query": question,
+        "collection_id": collection_id,
+    }
+    if include_steps:
+        payload["include_steps"] = True
+    return _hebbrix_request("POST", "/search/reason", payload=payload)
 
 
 def _chat_hebbrix(question: str, collection_id: str, document_id: str = "", context_snippets: list[str] | None = None) -> dict:
@@ -454,6 +464,33 @@ def _format_hebbrix_results(payload: dict) -> list[dict]:
     return results
 
 
+def _normalise_hebbrix_sources(payload) -> list[dict]:
+    if not isinstance(payload, dict):
+        return []
+    for key in ("sources", "results", "contexts", "references", "citations", "chunks"):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            items = [item for item in value if isinstance(item, dict)]
+            if items:
+                return items
+
+    memory_context = payload.get("memory_context")
+    if isinstance(memory_context, dict):
+        memories = memory_context.get("memories")
+        if isinstance(memories, list):
+            return [item for item in memories if isinstance(item, dict)]
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        for key in ("sources", "results", "contexts", "chunks"):
+            value = data.get(key)
+            if isinstance(value, list):
+                items = [item for item in value if isinstance(item, dict)]
+                if items:
+                    return items
+    return []
+
+
 def _hebbrix_result_document_id(item: dict) -> str:
     if not isinstance(item, dict):
         return ""
@@ -468,6 +505,30 @@ def _hebbrix_result_document_id(item: dict) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _format_hebbrix_reason_results(payload: dict, hebbrix_document_id: str = "") -> list[dict]:
+    items = _normalise_hebbrix_sources(payload)
+    results: list[dict] = []
+    for item in items:
+        item_document_id = _hebbrix_result_document_id(item)
+        if hebbrix_document_id and item_document_id and item_document_id != hebbrix_document_id:
+            continue
+
+        text = _normalise_passage_text(item.get("content") or item.get("snippet") or item.get("text") or "")
+        if not text:
+            continue
+
+        results.append(
+            {
+                "text": text,
+                "score": item.get("score"),
+                "source": item.get("memory_id") or item.get("id") or "hebbrix_reason",
+            }
+        )
+        if len(results) >= 8:
+            break
+    return results
 
 
 def _is_toc_like_text(text: str) -> bool:
@@ -511,7 +572,9 @@ def _filter_hebbrix_items_to_document(payload: dict, hebbrix_document_id: str) -
 def _tokenize_grounding_text(text: str) -> set[str]:
     tokens = set()
     for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", str(text or "").lower()):
-        if token.endswith("s") and len(token) > 4:
+        if token.endswith("ies") and len(token) > 4:
+            token = token[:-3] + "y"
+        elif token.endswith("s") and len(token) > 4:
             token = token[:-1]
         if token and token not in GROUNDING_STOP_WORDS:
             tokens.add(token)
@@ -553,6 +616,32 @@ def _normalise_passage_text(text: str) -> str:
     return value.strip()
 
 
+def _split_hebbrix_sentences(text: str) -> list[str]:
+    value = _normalise_passage_text(text).replace("\n", " ").strip()
+    if not value:
+        return []
+
+    placeholder = "__HBX_DOT__"
+    protected = value
+    protected = re.sub(
+        r"\b([A-Z])\.(?=\s+[A-Z][a-z])",
+        lambda match: f"{match.group(1)}{placeholder}",
+        protected,
+    )
+    protected = re.sub(
+        r"\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc)\.(?=\s)",
+        lambda match: f"{match.group(1)}{placeholder}",
+        protected,
+        flags=re.IGNORECASE,
+    )
+    parts = re.split(r"(?<=[.!?])\s+", protected)
+    return [
+        part.replace(placeholder, ".").strip()
+        for part in parts
+        if len(part.replace(placeholder, ".").strip()) > 2
+    ]
+
+
 def _trim_to_question_focus(text: str, question: str) -> str:
     value = str(text or "").strip()
     question_tokens = sorted(_tokenize_grounding_text(question), key=len, reverse=True)
@@ -590,18 +679,28 @@ def _is_heading_like_sentence(text: str) -> bool:
     return False
 
 
+def _fix_hebbrix_acronym_artifacts(text: str) -> str:
+    value = str(text or "")
+    value = re.sub(r"^([A-Z]{2,})\)\s+are\b", r"\1s are", value)
+    value = re.sub(r"^([A-Z]{2,})\)\s+is\b", r"\1 is", value)
+    value = re.sub(r"^([A-Za-z0-9_-]+)\)", r"\1", value)
+    value = re.sub(r"^[)\]}]+", "", value)
+    return value
+
+
 def _clean_hebbrix_sentence(text: str, question: str = "") -> str:
     value = _normalise_passage_text(text)
     if not value:
         return ""
     value = re.sub(r"([A-Za-z])[‐‑-]\s+([A-Za-z])", r"\1\2", value)
+    value = _fix_hebbrix_acronym_artifacts(value)
     value = re.sub(r"^(Figure|Table)\s+\d+(?:-\d+)?\.?\s*", "", value, flags=re.IGNORECASE)
     value = re.sub(r"^[A-Z][A-Za-z ]{0,40}\s+setup\s+", "", value, flags=re.IGNORECASE)
     value = re.sub(r"^\s*\d{1,4}\s+", "", value)
     value = re.sub(r"\s+\d{1,4}\s*$", "", value)
     value = re.sub(r"\bPage\s+\d+\b", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\s{2,}", " ", value).strip(" -:;,.")
-    value = _trim_to_question_focus(value, question)
+    value = _fix_hebbrix_acronym_artifacts(value)
     if _is_heading_like_sentence(value):
         return ""
     return value.strip()
@@ -623,7 +722,7 @@ def _looks_like_noisy_answer(text: str) -> bool:
 def _clean_hebbrix_answer_text(text: str, question: str = "") -> str:
     sentences: list[str] = []
     seen = set()
-    for sentence in split_into_sentences(text):
+    for sentence in _split_hebbrix_sentences(text):
         cleaned = _clean_hebbrix_sentence(sentence, question)
         if not cleaned:
             continue
@@ -709,7 +808,7 @@ def _extract_grounded_sentences(results: list[dict], question: str, limit: int =
         text = _normalise_passage_text(result.get("text", ""))
         if not text:
             continue
-        for sentence in split_into_sentences(text):
+        for sentence in _split_hebbrix_sentences(text):
             cleaned = _clean_hebbrix_sentence(sentence, question)
             if not cleaned:
                 continue
@@ -763,7 +862,7 @@ def _build_hebbrix_overview_context(chunks: list[dict], limit: int = 6) -> list[
         if not text or _is_toc_like_text(text):
             continue
         cleaned_sentences = []
-        for sentence in split_into_sentences(text):
+        for sentence in _split_hebbrix_sentences(text):
             cleaned = _clean_hebbrix_sentence(sentence)
             if not cleaned:
                 continue
@@ -818,7 +917,7 @@ def _select_hebbrix_chunk_passages(question: str, chunks: list[dict], limit: int
             candidates.append((_score_hebbrix_passage(question, snippet), snippet))
 
         # Then fall back to short sentence windows for definitional answers.
-        sentences = split_into_sentences(text)
+        sentences = _split_hebbrix_sentences(text)
         if sentences:
             for index in range(len(sentences)):
                 window = " ".join(sentences[index:index + 3]).strip()
@@ -835,16 +934,25 @@ def _select_hebbrix_chunk_passages(question: str, chunks: list[dict], limit: int
 
 
 def _results_support_question(question: str, results: list[dict]) -> bool:
-    if not results:
+    return _question_text_support(
+        question,
+        [result.get("text", "") for result in results[:3]],
+    )
+
+
+def _question_text_support(question: str, texts: list[str]) -> bool:
+    if not texts:
         return False
     question_tokens = _tokenize_grounding_text(question)
     if not question_tokens:
         return True
-    result_tokens: set[str] = set()
-    for result in results[:3]:
-        result_tokens.update(_tokenize_grounding_text(result.get("text", "")))
-    overlap = question_tokens & result_tokens
-    required = 1 if len(question_tokens) <= 2 else 2
+
+    text_tokens: set[str] = set()
+    for text in texts:
+        text_tokens.update(_tokenize_grounding_text(text))
+
+    overlap = question_tokens & text_tokens
+    required = 1 if len(question_tokens) <= 1 else min(2, len(question_tokens))
     return len(overlap) >= required
 
 
@@ -872,7 +980,7 @@ def _build_grounded_hebbrix_answer(results: list[dict], question: str = "") -> s
     best_snippet = snippets[0]
     summary_sentences = [
         cleaned
-        for cleaned in (_clean_hebbrix_sentence(sentence, question) for sentence in split_into_sentences(best_snippet))
+        for cleaned in (_clean_hebbrix_sentence(sentence, question) for sentence in _split_hebbrix_sentences(best_snippet))
         if cleaned
     ]
     if summary_sentences:
@@ -1036,29 +1144,32 @@ async def upload_pdf(file: UploadFile = File(...)):
             }
         
         # 2. Build rich hybrid chunks: headings + paragraphs + sentence-safe sliding overlap.
-        chunks = build_hybrid_chunks(
+        all_chunks = build_hybrid_chunks(
             pages,
             target_words=UPLOAD_TARGET_WORDS,
             min_words=UPLOAD_MIN_WORDS,
             max_words=UPLOAD_MAX_WORDS,
             overlap_ratio=UPLOAD_OVERLAP_WORDS / max(1, UPLOAD_TARGET_WORDS),
         )
-        _backend_log(f"Built {len(chunks)} hybrid chunks for upload processing.")
-        if len(chunks) > UPLOAD_MAX_CHUNKS:
-            original_count = len(chunks)
-            chunks = _merge_chunks_for_limit(chunks, UPLOAD_MAX_CHUNKS)
-            _backend_log(
-                f"Reduced upload workload from {original_count} chunks to {len(chunks)} chunks for Hebbrix-friendly processing."
-            )
-        if not chunks:
+        _backend_log(f"Built {len(all_chunks)} hybrid chunks for upload processing.")
+        if not all_chunks:
             return {
                 "error": "The document could not be split into usable text chunks.",
                 "trace": "",
             }
 
-        chunks = precompute_chunk_metadata(chunks)
+        # Limit chunks for LLM triple extraction only; keep all chunks for semantic retrieval.
+        extraction_chunks = all_chunks
+        if len(all_chunks) > UPLOAD_MAX_CHUNKS:
+            extraction_chunks = _merge_chunks_for_limit(all_chunks, UPLOAD_MAX_CHUNKS)
+            _backend_log(
+                f"Using {len(extraction_chunks)} merged chunks for triple extraction "
+                f"(all {len(all_chunks)} chunks kept for semantic retrieval)."
+            )
+
+        extraction_chunks = precompute_chunk_metadata(extraction_chunks)
         _backend_log("Chunk metadata enrichment step finished.")
-        chunk_texts = [chunk["text"] for chunk in chunks]
+        chunk_texts = [chunk["text"] for chunk in extraction_chunks]
         
         graph = GraphStore()
         document_id = str(uuid.uuid4())
@@ -1114,7 +1225,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         _backend_log(
             f"Stored document summary and inserted {triples_added} triples into MongoDB."
         )
-        save_document_chunks(document_id, file.filename, chunks)
+        save_document_chunks(document_id, file.filename, all_chunks)
         set_active_document(document_id, file.filename)
         _backend_log("Saved chunk state and set the uploaded document as active.")
         
@@ -1125,25 +1236,27 @@ async def upload_pdf(file: UploadFile = File(...)):
                 "note": "The PDF text chunks were still saved for semantic retrieval.",
                 "trace": "",
                 "debug": {
-                    "chunks_processed": len(chunks),
+                    "chunks_processed": len(all_chunks),
+                    "extraction_chunks": len(extraction_chunks),
                     "sample_triples": extracted_triples_debug,
                     "triples_added": triples_added,
                     "workers_used": UPLOAD_WORKERS,
                     "document_id": document_id,
                 },
             }
-        
+
         return {
             "message": "PDF processed successfully. The knowledge graph is ready.",
             "file_name": file.filename,
-            "chunks_processed": len(chunks),
+            "chunks_processed": len(all_chunks),
             "triples_added": triples_added,
             "document_id": document_id,
             "summary": summary,
             "sample_triples": extracted_triples_debug,
             "debug": {
                 "file_name": file.filename,
-                "chunks_processed": len(chunks),
+                "chunks_processed": len(all_chunks),
+                "extraction_chunks": len(extraction_chunks),
                 "sample_triples": extracted_triples_debug,
                 "triples_added": triples_added,
                 "workers_used": UPLOAD_WORKERS,
@@ -1243,11 +1356,52 @@ async def ask(q: QuestionRequest):
                         "results_count": len(overview_context[:4]),
                     },
                 }
+
+            try:
+                reason_payload = _search_hebbrix_reason(question, collection_id, include_steps=True)
+            except Exception as error:
+                _backend_log(f"Hebbrix search/reason failed, falling back to manual search path: {error}")
+                reason_payload = {}
+
+            reason_results = _format_hebbrix_reason_results(reason_payload, hebbrix_document_id)
+            reason_answer = _clean_hebbrix_answer_text(
+                _extract_answer_from_hebbrix(reason_payload),
+                question,
+            )
+            if (
+                reason_answer
+                and reason_answer != "It is not in the uploaded document. Please check the text."
+                and not _looks_like_noisy_answer(reason_answer)
+                and _question_text_support(
+                    question,
+                    [reason_answer] + [result.get("text", "") for result in reason_results[:3]],
+                )
+            ):
+                return {
+                    "triples_added": 0,
+                    "query": question,
+                    "results": reason_results,
+                    "answer": reason_answer,
+                    "steps": ["Hebbrix search reason"],
+                    "debug": {
+                        "provider": "hebbrix",
+                        "mode": "native-document-search-reason",
+                        "collection_id": collection_id,
+                        "document_id": document_id,
+                        "hebbrix_document_id": hebbrix_document_id,
+                        "results_count": len(reason_results),
+                        "reasoning_context": reason_payload.get("reasoning_context"),
+                    },
+                }
+
             results: list[dict] = []
+            raw_search_results: list[dict] = []
             for query_variant in _hebbrix_query_variants(question):
                 search_payload = _search_hebbrix(query_variant, collection_id, hebbrix_document_id)
                 search_items = _filter_hebbrix_items_to_document(search_payload, hebbrix_document_id)
                 results = _format_hebbrix_results({"results": search_items})
+                if results and not raw_search_results:
+                    raw_search_results = results
                 if _results_support_question(question, results):
                     break
             if not _results_support_question(question, results):
@@ -1266,12 +1420,16 @@ async def ask(q: QuestionRequest):
             if grounded_answer and _answer_supported_by_results(grounded_answer, passage_results or results):
                 answer = grounded_answer
 
-            if results and (not answer or not _is_definition_question(question)):
+            # Use validated results for context, fall back to raw search results when validation
+            # cleared them (e.g. keyword mismatch despite document having relevant content).
+            validated_context = passage_results or results
+            chat_context = [r.get("text", "") for r in (validated_context or raw_search_results)[:3]]
+            if chat_context and (not answer or not _is_definition_question(question)):
                 chat_payload = _chat_hebbrix(
                     question,
                     collection_id,
                     hebbrix_document_id,
-                    [result.get("text", "") for result in (passage_results or results)[:3]],
+                    chat_context,
                 )
                 candidate_answer = _clean_hebbrix_answer_text(
                     _extract_answer_from_hebbrix(chat_payload),
@@ -1281,7 +1439,7 @@ async def ask(q: QuestionRequest):
                     candidate_answer
                     and not _looks_like_noisy_answer(candidate_answer)
                     and candidate_answer != "It is not in the uploaded document. Please check the text."
-                    and _answer_supported_by_results(candidate_answer, passage_results or results)
+                    and _answer_supported_by_results(candidate_answer, validated_context or raw_search_results)
                     and _score_hebbrix_passage(question, candidate_answer) >= _score_hebbrix_passage(question, answer)
                 ):
                     answer = candidate_answer.strip()

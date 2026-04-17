@@ -1,3 +1,4 @@
+from io import BytesIO
 import json
 import re
 from collections import Counter
@@ -6,6 +7,11 @@ try:
     import fitz  # PyMuPDF
 except Exception:  # pragma: no cover - handled when PDF parsing is actually used
     fitz = None
+
+try:
+    from pypdf import PdfReader
+except Exception:  # pragma: no cover - handled when PDF parsing is actually used
+    PdfReader = None
 
 
 KEYWORD_STOP_WORDS = {
@@ -51,17 +57,27 @@ KEYWORD_STOP_WORDS = {
 
 def extract_pdf_pages(file_bytes: bytes) -> list[dict]:
     """Extract page-aware PDF text so chunks can keep page metadata."""
-    if fitz is None:
-        raise RuntimeError(
-            "PyMuPDF is not installed in the current environment. "
-            "Install dependencies from requirements.txt before uploading PDFs."
-        )
     pages: list[dict] = []
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    for index, page in enumerate(doc, start=1):
-        text = page.get_text() or ""
-        if text.strip():
-            pages.append({"page": index, "text": text})
+    if fitz is not None:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        for index, page in enumerate(doc, start=1):
+            text = page.get_text() or ""
+            if text.strip():
+                pages.append({"page": index, "text": text})
+        return pages
+
+    if PdfReader is not None:
+        reader = PdfReader(BytesIO(file_bytes))
+        for index, page in enumerate(reader.pages, start=1):
+            text = page.extract_text() or ""
+            if text.strip():
+                pages.append({"page": index, "text": text})
+        return pages
+
+    raise RuntimeError(
+        "No PDF parser is available in the current environment. "
+        "Install dependencies from requirements.txt before uploading PDFs."
+    )
     return pages
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:

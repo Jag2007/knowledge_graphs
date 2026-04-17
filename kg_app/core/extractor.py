@@ -294,7 +294,7 @@ def precompute_chunk_metadata(chunks: list[dict]) -> list[dict]:
     payload = [
         {
             "id": chunk.get("id", f"chunk_{index + 1}"),
-            "text": str(chunk.get("text", ""))[:900],
+            "text": str(chunk.get("text", ""))[:2400],
         }
         for index, chunk in enumerate(chunks[:max_chunks])
         if str(chunk.get("text", "")).strip()

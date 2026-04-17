@@ -161,6 +161,7 @@ class AppSmokeTests(unittest.TestCase):
         self.original_set_active_document = app_server.set_active_document
         self.original_get_active_document = app_server.get_active_document
         self.original_search_hebbrix = app_server._search_hebbrix
+        self.original_search_hebbrix_reason = app_server._search_hebbrix_reason
         self.original_chat_hebbrix = app_server._chat_hebbrix
         self.original_fetch_hebbrix_chunks = app_server._fetch_hebbrix_chunks
         self.original_query_hebbrix_graph = app_server._query_hebbrix_graph
@@ -189,6 +190,7 @@ class AppSmokeTests(unittest.TestCase):
         app_server.set_active_document = self.original_set_active_document
         app_server.get_active_document = self.original_get_active_document
         app_server._search_hebbrix = self.original_search_hebbrix
+        app_server._search_hebbrix_reason = self.original_search_hebbrix_reason
         app_server._chat_hebbrix = self.original_chat_hebbrix
         app_server._fetch_hebbrix_chunks = self.original_fetch_hebbrix_chunks
         app_server._query_hebbrix_graph = self.original_query_hebbrix_graph
@@ -295,34 +297,53 @@ class AppSmokeTests(unittest.TestCase):
         self.assertNotIn("325 Deep Reinforcement Learning", answer)
         self.assertNotIn("What Is Reinforcement Learning?", answer)
 
+    def test_hebbrix_answer_cleanup_keeps_initials_with_following_surname(self):
+        answer = app_server._clean_hebbrix_answer_text(
+            (
+                "Backpropagation is an algorithm used for training multilayer neural networks. "
+                "It was pioneered by David E. Rumelhart, Geoffrey E. Hinton, and Ronald J. Williams in 1986."
+            ),
+            question="what is backpropagation",
+        )
+        self.assertIn("David E. Rumelhart", answer)
+        self.assertIn("Geoffrey E. Hinton", answer)
+
+    def test_hebbrix_answer_cleanup_removes_unmatched_acronym_parenthesis(self):
+        answer = app_server._clean_hebbrix_answer_text(
+            "LSTM) are a type of recurrent neural network used for sequence prediction.",
+            question="what is lstm",
+        )
+        self.assertFalse(answer.startswith("LSTM)"))
+        self.assertTrue(answer.startswith("LSTMs are") or answer.startswith("LSTM is"))
+
+    def test_hebbrix_answer_cleanup_handles_trimmed_long_form_to_acronym(self):
+        answer = app_server._clean_hebbrix_answer_text(
+            "Long Short-Term Memory Networks (LSTM) are a type of recurrent neural network used for sequence prediction.",
+            question="what is lstm",
+        )
+        # The full expansion should be preserved — trimming "Long Short-Term Memory Networks" was incorrect
+        self.assertFalse(answer.startswith("LSTM)"))
+        self.assertIn("LSTM", answer)
+        self.assertIn("recurrent neural network", answer.lower())
+
     def test_hebbrix_answers_are_limited_to_active_document_results(self):
         os.environ["HEBBRIX_NATIVE_MODE"] = "1"
         self._set_active_document("hebbrix:col-1:doc-1", "biology.pdf")
-        app_server._search_hebbrix = lambda question, collection_id, document_id="": {
-            "results": [
+        app_server._search_hebbrix_reason = lambda question, collection_id, include_steps=True: {
+            "answer": "Biology studies life and living organisms.",
+            "sources": [
                 {
                     "content": "Biology studies life and living organisms.",
+                    "score": 0.95,
                     "metadata": {"document_id": "doc-1"},
                 },
                 {
                     "content": "The Constitution defines the legal structure of the state.",
+                    "score": 0.88,
                     "metadata": {"document_id": "doc-2"},
                 },
             ]
         }
-        app_server._chat_hebbrix = lambda question, collection_id, document_id="", context_snippets=None: {
-            "choices": [
-                {
-                    "message": {
-                        "content": "Biology studies life and living organisms."
-                    }
-                }
-            ]
-        }
-        app_server._fetch_hebbrix_chunks = lambda document_id: [
-            {"text": "Biology studies life and living organisms."}
-        ]
-        app_server._query_hebbrix_graph = lambda question, collection_id: {"results": []}
 
         response = self.client.post("/ask", json={"question": "what does biology study"})
 
@@ -330,18 +351,22 @@ class AppSmokeTests(unittest.TestCase):
         payload = response.json()
         self.assertIn("Biology studies life", payload["answer"])
         self.assertEqual(len(payload["results"]), 1)
+        self.assertEqual(payload["steps"], ["Hebbrix search reason"])
 
     def test_hebbrix_rejects_questions_not_supported_by_uploaded_document(self):
         os.environ["HEBBRIX_NATIVE_MODE"] = "1"
         self._set_active_document("hebbrix:col-1:doc-1", "biology.pdf")
-        app_server._search_hebbrix = lambda question, collection_id, document_id="": {
-            "results": [
+        app_server._search_hebbrix_reason = lambda question, collection_id, include_steps=True: {
+            "answer": "Biology studies life and living organisms.",
+            "sources": [
                 {
                     "content": "Biology studies life and living organisms.",
+                    "score": 0.95,
                     "metadata": {"document_id": "doc-1"},
                 }
             ]
         }
+        app_server._search_hebbrix = lambda question, collection_id, document_id="": {"results": []}
         app_server._chat_hebbrix = lambda question, collection_id, document_id="", context_snippets=None: {
             "choices": [
                 {
@@ -363,28 +388,24 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(payload["answer"], "It is not in the uploaded document. Please check the text.")
         self.assertEqual(payload["results"], [])
 
-    def test_hebbrix_grounded_answer_beats_weaker_chat_answer(self):
+    def test_hebbrix_reason_answers_definition_questions_before_chat_fallback(self):
         os.environ["HEBBRIX_NATIVE_MODE"] = "1"
         self._set_active_document("hebbrix:col-1:doc-1", "rl.pdf")
-        app_server._search_hebbrix = lambda question, collection_id, document_id="": {
-            "results": [
+        app_server._search_hebbrix_reason = lambda question, collection_id, include_steps=True: {
+            "answer": (
+                "Reinforcement learning is learning by interacting with an environment and receiving rewards."
+            ),
+            "sources": [
                 {
                     "content": (
                         "What Is Reinforcement Learning? Reinforcement learning is learning by interacting "
                         "with an environment and receiving rewards."
                     ),
+                    "score": 0.98,
                     "metadata": {"document_id": "doc-1"},
                 }
             ]
         }
-        app_server._fetch_hebbrix_chunks = lambda document_id: [
-            {
-                "text": (
-                    "What Is Reinforcement Learning? Reinforcement learning is learning by interacting "
-                    "with an environment and receiving rewards."
-                )
-            }
-        ]
         app_server._chat_hebbrix = lambda question, collection_id, document_id="", context_snippets=None: {
             "choices": [
                 {
@@ -404,10 +425,21 @@ class AppSmokeTests(unittest.TestCase):
         payload = response.json()
         self.assertIn("Reinforcement learning is learning by interacting", payload["answer"])
         self.assertNotIn("deep learning is still", payload["answer"])
+        self.assertEqual(payload["steps"], ["Hebbrix search reason"])
 
-    def test_hebbrix_definition_questions_prefer_grounded_answer_over_chat_rewrite(self):
+    def test_hebbrix_definition_questions_fall_back_when_reason_is_not_grounded(self):
         os.environ["HEBBRIX_NATIVE_MODE"] = "1"
         self._set_active_document("hebbrix:col-1:doc-1", "rl.pdf")
+        app_server._search_hebbrix_reason = lambda question, collection_id, include_steps=True: {
+            "answer": "The constitution is the supreme law of the land.",
+            "sources": [
+                {
+                    "content": "Biology studies life and living organisms.",
+                    "score": 0.2,
+                    "metadata": {"document_id": "doc-1"},
+                }
+            ]
+        }
         app_server._search_hebbrix = lambda question, collection_id, document_id="": {
             "results": [
                 {
